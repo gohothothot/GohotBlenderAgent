@@ -53,20 +53,22 @@ class BlenderAgent:
         self.on_code_confirm: Optional[Callable[[str, str, Callable], None]] = None
         self.on_error: Optional[Callable[[str], None]] = None
 
-        self.system_prompt = """你是一个 Blender 3D 建模助手，运行在 Blender 内部。
+        self.system_prompt = """你是 Gohot Blender Agent，一个强大的 Blender 3D 助手。
 
 你的能力：
-1. 创建和操作 3D 物体（立方体、球体、圆柱等）
-2. 设置材质颜色、金属度、粗糙度
-3. 执行自定义 Python/bpy 代码来完成复杂任务
+1. 基础操作：创建/删除/变换物体，设置材质颜色和PBR属性
+2. AI 3D生成：通过 Meshy AI 实现文生3D、图生3D，自动导入带PBR贴图的模型
+3. 场景分析：截取视口画面，分析场景并给出优化建议（光照、构图、材质等）
+4. 渲染助手：设置渲染参数（引擎、分辨率、采样数等），执行渲染输出
+5. 代码执行：执行自定义 Python/bpy 代码完成复杂任务
 
 使用规则：
-- 对于简单操作，使用对应的工具
-- 对于复杂操作（如建模、动画），使用 execute_python 工具
-- 执行代码前，先用 description 参数说明代码功能
-- 回复要简洁，操作完成后告知结果
-
-当前场景信息会在对话中提供。"""
+- 简单操作直接使用对应工具
+- 需要看场景时使用 analyze_scene 工具
+- 渲染前先用 setup_render 设置参数，再用 render_image 执行
+- 生成3D模型时告知用户需要等待几分钟
+- 执行代码前用 description 说明功能
+- 回复简洁，完成后告知结果"""
 
     def _get_tools(self):
         from . import tools
@@ -203,6 +205,15 @@ class BlenderAgent:
                     )
                 return
 
+            if result.get("result") == "NEEDS_VISION_ANALYSIS":
+                self._handle_vision_analysis(
+                    tool_id,
+                    result.get("image_data"),
+                    result.get("scene_info"),
+                    result.get("question"),
+                )
+                return
+
             if result.get("success"):
                 tool_results.append({
                     "type": "tool_result",
@@ -248,6 +259,54 @@ class BlenderAgent:
             }
 
         self._continue_with_tool_results([tool_result])
+
+    def _handle_vision_analysis(self, tool_id: str, image_data: str, scene_info: dict, question: str):
+        try:
+            vision_message = {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": image_data,
+                        },
+                    },
+                    {
+                        "type": "text",
+                        "text": f"这是当前 Blender 场景的截图。\n\n场景信息：{json.dumps(scene_info, ensure_ascii=False, indent=2)}\n\n用户问题：{question}\n\n请分析这个场景并回答用户的问题，给出具体的建议。",
+                    },
+                ],
+            }
+
+            temp_history = self.conversation_history.copy()
+            temp_history.append(vision_message)
+
+            response = self._call_api(messages=temp_history, tools=None)
+
+            analysis_text = ""
+            for block in response.get("content", []):
+                if block.get("type") == "text":
+                    analysis_text += block.get("text", "")
+
+            tool_result = {
+                "type": "tool_result",
+                "tool_use_id": tool_id,
+                "content": analysis_text,
+            }
+
+            self._continue_with_tool_results([tool_result])
+
+        except Exception as e:
+            log_error(f"Vision analysis error: {str(e)}")
+            tool_result = {
+                "type": "tool_result",
+                "tool_use_id": tool_id,
+                "content": f"场景分析失败: {str(e)}",
+                "is_error": True,
+            }
+            self._continue_with_tool_results([tool_result])
 
     def _continue_with_tool_results(self, tool_results: list):
         try:

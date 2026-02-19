@@ -181,6 +181,83 @@ TOOLS = [
             "required": ["image_url"],
         },
     },
+    {
+        "name": "analyze_scene",
+        "description": "截取当前3D视口画面，让AI分析场景并给出建议。可用于获取场景优化建议、构图建议、光照建议等。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": "想要AI分析的问题，如：这个场景的光照怎么样？构图有什么问题？",
+                },
+            },
+            "required": ["question"],
+        },
+    },
+    {
+        "name": "get_scene_info",
+        "description": "获取当前场景的详细信息，包括所有物体、渲染设置、世界环境等。",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    {
+        "name": "setup_render",
+        "description": "设置渲染参数。可设置渲染引擎、分辨率、采样数、输出路径等。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "engine": {
+                    "type": "string",
+                    "enum": ["cycles", "eevee", "workbench"],
+                    "description": "渲染引擎",
+                },
+                "resolution_x": {
+                    "type": "integer",
+                    "description": "分辨率宽度",
+                },
+                "resolution_y": {
+                    "type": "integer",
+                    "description": "分辨率高度",
+                },
+                "samples": {
+                    "type": "integer",
+                    "description": "采样数（Cycles/EEVEE）",
+                },
+                "output_path": {
+                    "type": "string",
+                    "description": "输出文件路径",
+                },
+                "file_format": {
+                    "type": "string",
+                    "enum": ["png", "jpg", "exr", "tiff"],
+                    "description": "输出文件格式",
+                },
+                "use_gpu": {
+                    "type": "boolean",
+                    "description": "是否使用GPU渲染（仅Cycles）",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "render_image",
+        "description": "执行渲染并保存图片到指定路径。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "output_path": {
+                    "type": "string",
+                    "description": "输出文件路径（可选，默认保存到临时目录）",
+                },
+            },
+            "required": [],
+        },
+    },
 ]
 
 
@@ -319,6 +396,14 @@ def execute_tool(tool_name: str, arguments: dict) -> dict:
             return _meshy_text_to_3d(**arguments)
         elif tool_name == "meshy_image_to_3d":
             return _meshy_image_to_3d(**arguments)
+        elif tool_name == "analyze_scene":
+            return _analyze_scene(**arguments)
+        elif tool_name == "get_scene_info":
+            return _get_scene_info_full()
+        elif tool_name == "setup_render":
+            return _setup_render(**arguments)
+        elif tool_name == "render_image":
+            return _render_image(**arguments)
         else:
             return {"success": False, "result": None, "error": f"未知工具: {tool_name}"}
     except Exception as e:
@@ -503,3 +588,57 @@ def execute_python_code(code: str) -> dict:
         return {"success": True, "result": result, "error": None}
     except Exception as e:
         return {"success": False, "result": None, "error": str(e)}
+
+
+def _analyze_scene(question: str) -> dict:
+    from . import scene_utils
+    
+    image_data = scene_utils.capture_viewport_screenshot(1024, 768)
+    if not image_data:
+        return {"success": False, "result": None, "error": "无法截取视口画面"}
+    
+    scene_info = scene_utils.get_scene_info()
+    
+    return {
+        "success": True,
+        "result": "NEEDS_VISION_ANALYSIS",
+        "image_data": image_data,
+        "scene_info": scene_info,
+        "question": question,
+        "error": None,
+    }
+
+
+def _get_scene_info_full() -> dict:
+    from . import scene_utils
+    
+    info = scene_utils.get_scene_info()
+    return {"success": True, "result": info, "error": None}
+
+
+def _setup_render(
+    engine: str = None,
+    resolution_x: int = None,
+    resolution_y: int = None,
+    samples: int = None,
+    output_path: str = None,
+    file_format: str = None,
+    use_gpu: bool = None,
+) -> dict:
+    from . import scene_utils
+    
+    return scene_utils.setup_render_settings(
+        engine=engine,
+        resolution_x=resolution_x,
+        resolution_y=resolution_y,
+        samples=samples,
+        output_path=output_path,
+        file_format=file_format,
+        use_gpu=use_gpu,
+    )
+
+
+def _render_image(output_path: str = None) -> dict:
+    from . import scene_utils
+    
+    return scene_utils.render_image(output_path=output_path)
