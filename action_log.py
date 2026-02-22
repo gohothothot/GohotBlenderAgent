@@ -36,7 +36,6 @@ def start_session(user_message: str) -> str:
 def log_tool_call(tool_name: str, arguments: dict, result: dict):
     if _current_session is None:
         return
-
     entry = {
         "timestamp": datetime.now().isoformat(),
         "type": "tool_call",
@@ -45,9 +44,8 @@ def log_tool_call(tool_name: str, arguments: dict, result: dict):
         "success": result.get("success", False),
         "result_summary": _summarize_result(result),
     }
-
     if not result.get("success"):
-        entry["error"] = result.get("error", "")
+        entry["error"] = str(result.get("error", ""))[:1000]
 
     _current_session["actions"].append(entry)
 
@@ -60,7 +58,7 @@ def log_agent_message(role: str, content: str):
         "timestamp": datetime.now().isoformat(),
         "type": "message",
         "role": role,
-        "content": content[:500],
+        "content": content[:2000],
     })
 
 
@@ -86,6 +84,19 @@ def log_kb_lookup(query: str, found: bool, source: str = ""):
         "query": query,
         "found": found,
         "source": source,
+    })
+
+
+def log_error(error_type: str, error_message: str):
+    """记录错误到当前 session 日志"""
+    if _current_session is None:
+        return
+
+    _current_session["actions"].append({
+        "timestamp": datetime.now().isoformat(),
+        "type": "error",
+        "error_type": error_type,
+        "message": error_message[:2000],
     })
 
 
@@ -150,9 +161,13 @@ def _safe_serialize(obj: Any) -> Any:
 def _summarize_result(result: dict) -> str:
     r = result.get("result", "")
     if isinstance(r, str):
-        return r[:200]
+        return r[:500]
     elif isinstance(r, dict):
-        return json.dumps(r, ensure_ascii=False)[:200]
+        return json.dumps(r, ensure_ascii=False)[:500]
     elif isinstance(r, list):
-        return f"[{len(r)} items]"
-    return str(r)[:200]
+        # 记录前几个元素的摘要，而不是只记录数量
+        summary = json.dumps(r[:5], ensure_ascii=False)[:500]
+        if len(r) > 5:
+            summary += f" ...共{len(r)}项"
+        return summary
+    return str(r)[:500]

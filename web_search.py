@@ -32,7 +32,7 @@ def _ddg_search(query: str, max_results: int = 5) -> list:
     })
 
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=8) as resp:
             data = json.loads(resp.read().decode("utf-8"))
 
         results = []
@@ -66,7 +66,7 @@ def _ddg_html_search(query: str, max_results: int = 5) -> list:
     })
 
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=8) as resp:
             html = resp.read().decode("utf-8", errors="ignore")
 
         results = []
@@ -203,7 +203,7 @@ def _web_fetch_smart(url: str, max_chars: int = 4000) -> dict:
     })
 
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=8) as resp:
             html = resp.read().decode("utf-8", errors="ignore")
 
         if "bilibili.com" in url:
@@ -247,17 +247,9 @@ def web_search(query: str, max_results: int = 5) -> dict:
         if not results:
             results = _ddg_html_search(query, max_results)
 
-        # 3. 加关键词 fallback
+        # 3. 加关键词 fallback（仅1次，避免累积超时）
         if not results:
-            fallback_queries = [
-                f"{query} blender tutorial",
-                f"{query} blender shader node setup",
-                f"{query} blender procedural material",
-            ]
-            for fq in fallback_queries:
-                results = _ddg_html_search(fq, max_results)
-                if results:
-                    break
+            results = _ddg_html_search(f"{query} blender tutorial", max_results)
 
         if not results:
             return {
@@ -337,21 +329,19 @@ def web_fetch(url: str) -> dict:
 
 
 def web_search_blender(topic: str) -> dict:
-    """专门搜索 Blender 相关教程和资料 - 自动组合多个搜索词"""
+    """专门搜索 Blender 相关教程和资料 - 自动组合搜索词"""
     try:
         all_results = []
         seen_urls = set()
 
+        # 仅2个查询，单引擎，避免累积超时（原来3×2=6次请求，现在2次）
         search_queries = [
             f"blender {topic} shader nodes tutorial",
             f"blender {topic} procedural material setup",
-            f"blender {topic} node graph bpy python",
         ]
 
         for q in search_queries:
-            results = _ddg_html_search(q, 3)
-            if not results:
-                results = _ddg_search(q, 3)
+            results = _ddg_html_search(q, 4)
             for r in results:
                 if r.get("url") not in seen_urls:
                     seen_urls.add(r.get("url"))

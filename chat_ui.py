@@ -1,12 +1,11 @@
 """
-Blender Agent Chat UI - 弹窗对话界面
-
-在 Blender 中显示一个对话窗口，与 Agent 交互
+Blender Agent Chat UI - 侧边栏 + 弹窗双模式对话界面
 """
 
 import bpy
+import json
 from bpy.props import StringProperty, CollectionProperty, IntProperty, BoolProperty, EnumProperty
-from bpy.types import PropertyGroup, Operator, Panel, AddonPreferences
+from bpy.types import PropertyGroup, Operator, Panel, AddonPreferences, UIList
 
 
 class BlenderAgentPreferences(AddonPreferences):
@@ -17,14 +16,14 @@ class BlenderAgentPreferences(AddonPreferences):
         description="Claude API 地址（如 https://api.anthropic.com 或中转地址）",
         default="https://api.anthropic.com",
     )
-    
+
     api_key: StringProperty(
         name="API Key",
         description="你的 Claude API Key",
         default="",
         subtype='PASSWORD',
     )
-    
+
     model: EnumProperty(
         name="模型",
         description="选择使用的模型",
@@ -43,7 +42,7 @@ class BlenderAgentPreferences(AddonPreferences):
         ],
         default="claude-sonnet-4-5",
     )
-    
+
     custom_model: StringProperty(
         name="自定义模型",
         description="如果使用中转API，可以填写自定义模型名称（留空则使用上方选择）",
@@ -69,24 +68,24 @@ class BlenderAgentPreferences(AddonPreferences):
 
     def draw(self, context):
         layout = self.layout
-        
+
         layout.label(text="🤖 Claude API 配置", icon='PREFERENCES')
         box = layout.box()
         box.prop(self, "api_base")
         box.prop(self, "api_key")
         box.prop(self, "model")
         box.prop(self, "custom_model")
-        
+
         if not self.api_key:
             box.label(text="⚠️ 请填写 Claude API Key 才能使用 AI 助手", icon='ERROR')
 
         layout.separator()
-        
+
         layout.label(text="🎨 Meshy AI 配置", icon='MESH_MONKEY')
         box = layout.box()
         box.prop(self, "meshy_api_key")
         box.prop(self, "meshy_ai_model")
-        
+
         if not self.meshy_api_key:
             box.label(text="⚠️ 请填写 Meshy API Key 才能使用 3D 生成功能", icon='INFO')
             box.operator("wm.url_open", text="获取 Meshy API Key", icon='URL').url = "https://www.meshy.ai/settings/api"
@@ -94,6 +93,9 @@ class BlenderAgentPreferences(AddonPreferences):
 
 def get_preferences():
     return bpy.context.preferences.addons[__package__].preferences
+
+
+# ========== 数据模型 ==========
 
 
 class ChatMessage(PropertyGroup):
@@ -116,8 +118,8 @@ class TodoItem(PropertyGroup):
 
 
 class AgentState(PropertyGroup):
-
     messages: CollectionProperty(type=ChatMessage)
+    active_message_index: IntProperty(name="Active Message", default=0)
     todos: CollectionProperty(type=TodoItem)
     active_todo_index: IntProperty(name="Active Todo", default=0)
     input_text: StringProperty(name="Input", default="")
@@ -136,19 +138,20 @@ class AgentState(PropertyGroup):
     )
 
 
-# ========== 全局 Agent 实例 ==========
+# ========== Agent 实例管理 ==========
+
 _agent = None
 
 
 def get_agent():
     global _agent
     prefs = get_preferences()
-    
+
     if not prefs.api_key:
         return None
-    
+
     model = prefs.custom_model if prefs.custom_model else prefs.model
-    
+
     if _agent is None or _agent.api_base != prefs.api_base or _agent.api_key != prefs.api_key or _agent.model != model:
         from .agent_core import BlenderAgent
         _agent = BlenderAgent(
@@ -174,6 +177,7 @@ def _add_message(role: str, content: str, is_code: bool = False):
     msg.role = role
     msg.content = content
     msg.is_code = is_code
+    state.active_message_index = len(state.messages) - 1
 
     for area in bpy.context.screen.areas:
         area.tag_redraw()
@@ -186,7 +190,8 @@ def _on_agent_message(role: str, content: str):
 
 
 def _on_tool_call(tool_name: str, args: dict):
-    _add_message("system", f"🔧 调用工具: {tool_name}")
+    args_preview = json.dumps(args, ensure_ascii=False)[:200] if args else ""
+    _add_message("system", f"🔧 调用工具: {tool_name}\n{args_preview}")
 
 
 def _on_code_confirm(code: str, description: str, callback):
@@ -211,6 +216,43 @@ def _on_error(error: str):
 
 
 _pending_callback = None
+
+
+# ========== UIList ==========
+
+
+class AGENT_UL_MessageList(UIList):
+    bl_idname = "AGENT_UL_message_list"
+
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        if self.layout_type in {'DEFAULT', 'COMPACT'}:
+            row = layout.row(align=True)
+
+            if item.role == "user":
+                row.label(text="", icon='USER')
+            elif item.role == "assistant":
+                row.label(text="", icon='OUTLINER_OB_LIGHT')
+            else:
+                if "❌" in item.content or "错误" in item.content:
+                    row.label(text="", icon='ERROR')
+                elif "🔧" in item.content or "调用工具" in item.content:
+                    row.label(text="", icon='TOOL_SETTINGS')
+                else:
+                    row.label(text="", icon='INFO')
+
+            content_preview = item.content.replace('\n', ' ')[:200]
+            row.label(text=content_preview)
+
+            op = row.operator("agent.copy_message", text="", icon='COPYDOWN')
+            op.index = index
+
+            if len(item.content) > 100:
+                op2 = row.operator("agent.view_full_message", text="", icon='TEXT')
+                op2.index = index
+
+        elif self.layout_type == 'GRID':
+            layout.alignment = 'CENTER'
+            layout.label(text="", icon='CONSOLE')
 
 
 # ========== Operators ==========
@@ -297,6 +339,64 @@ class AGENT_OT_OpenSettings(Operator):
         return {"FINISHED"}
 
 
+class AGENT_OT_CopyMessage(Operator):
+    bl_idname = "agent.copy_message"
+    bl_label = "复制消息"
+    bl_description = "复制消息内容到剪贴板"
+
+    index: IntProperty()
+
+    def execute(self, context):
+        state = _get_state()
+        messages = list(state.messages)
+        if 0 <= self.index < len(messages):
+            context.window_manager.clipboard = messages[self.index].content
+            self.report({'INFO'}, "已复制到剪贴板")
+        return {'FINISHED'}
+
+
+class AGENT_OT_ViewFullMessage(Operator):
+    bl_idname = "agent.view_full_message"
+    bl_label = "查看完整消息"
+    bl_description = "在弹窗中查看完整消息内容"
+
+    index: IntProperty()
+
+    def execute(self, context):
+        return context.window_manager.invoke_props_dialog(self, width=600)
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self, width=600)
+
+    def draw(self, context):
+        layout = self.layout
+        state = _get_state()
+        messages = list(state.messages)
+        if 0 <= self.index < len(messages):
+            msg = messages[self.index]
+            if msg.role == "user":
+                layout.label(text="👤 你的消息", icon='USER')
+            elif msg.role == "assistant":
+                layout.label(text="🤖 AI 回复", icon='OUTLINER_OB_LIGHT')
+            else:
+                layout.label(text="ℹ️ 系统消息", icon='INFO')
+
+            layout.separator()
+
+            box = layout.box()
+            col = box.column(align=True)
+            lines = msg.content.split('\n')
+            for line in lines:
+                while len(line) > 100:
+                    col.label(text=line[:100])
+                    line = line[100:]
+                col.label(text=line if line else " ")
+
+            layout.separator()
+            op = layout.operator("agent.copy_message", text="📋 复制全部内容", icon='COPYDOWN')
+            op.index = self.index
+
+
 class AGENT_OT_AddTodo(Operator):
     bl_idname = "agent.add_todo"
     bl_label = "添加 TODO"
@@ -379,7 +479,7 @@ class AGENT_OT_OpenChat(Operator):
     bl_options = {"REGISTER"}
 
     def execute(self, context):
-        return context.window_manager.invoke_props_dialog(self, width=500)
+        return context.window_manager.invoke_props_dialog(self, width=700)
 
     def draw(self, context):
         layout = self.layout
@@ -393,46 +493,32 @@ class AGENT_OT_OpenChat(Operator):
             return
 
         box = layout.box()
-        box.label(text="对话历史", icon="CONSOLE")
+        row = box.row()
+        row.label(text="对话历史", icon="CONSOLE")
+        row.operator("agent.clear_history", text="", icon="TRASH")
 
-        col = box.column(align=True)
-
-        messages = list(state.messages)[-15:]
-
-        if not messages:
-            col.label(text="开始和 AI 助手对话吧！", icon="INFO")
-
-        for msg in messages:
-            row = col.row()
-
-            if msg.role == "user":
-                row.label(
-                    text=f"👤 你: {msg.content[:80]}{'...' if len(msg.content) > 80 else ''}"
-                )
-            elif msg.role == "assistant":
-                row.label(
-                    text=f"🤖 AI: {msg.content[:80]}{'...' if len(msg.content) > 80 else ''}"
-                )
-            else:
-                row.label(
-                    text=f"ℹ️ {msg.content[:80]}{'...' if len(msg.content) > 80 else ''}"
-                )
+        box.template_list(
+            "AGENT_UL_message_list",
+            "chat_messages_popup",
+            state,
+            "messages",
+            state,
+            "active_message_index",
+            rows=8,
+            maxrows=12,
+        )
 
         if state.pending_code:
             code_box = layout.box()
-            code_box.label(text="⚠️ 待确认的代码:", icon="ERROR")
+            code_box.label(text="⚠️ 待确认代码:", icon="ERROR")
             code_box.label(text=state.pending_code_desc)
-
-            code_preview = state.pending_code[:200] + (
-                "..." if len(state.pending_code) > 200 else ""
-            )
-            for line in code_preview.split("\n")[:5]:
+            code_preview = state.pending_code[:500]
+            for line in code_preview.split("\n")[:10]:
                 code_box.label(text=f"  {line}")
-
+            if len(state.pending_code) > 500:
+                code_box.label(text="  ...")
             row = code_box.row()
-            op_yes = row.operator(
-                "agent.confirm_code", text="✅ 执行", icon="CHECKMARK"
-            )
+            op_yes = row.operator("agent.confirm_code", text="✅ 执行", icon="CHECKMARK")
             op_yes.approved = True
             op_no = row.operator("agent.confirm_code", text="❌ 取消", icon="X")
             op_no.approved = False
@@ -448,37 +534,7 @@ class AGENT_OT_OpenChat(Operator):
 
         layout.separator()
         row = layout.row(align=True)
-        row.operator("agent.clear_history", text="清空对话", icon="TRASH")
         row.operator("agent.open_settings", text="设置", icon="PREFERENCES")
-
-        layout.separator()
-        todo_box = layout.box()
-        todo_box.label(text="📋 TODO List", icon="LINENUMBERS_ON")
-
-        for i, todo in enumerate(state.todos):
-            row = todo_box.row(align=True)
-            icon = "CHECKMARK" if todo.done else "CHECKBOX_DEHLT"
-            op_toggle = row.operator("agent.toggle_todo", text="", icon=icon)
-            op_toggle.index = i
-
-            type_icon = "🤖" if todo.todo_type == "AGENT" else "👤"
-            strike = "✓ " if todo.done else ""
-            row.label(text=f"{type_icon} {strike}{todo.content[:50]}")
-
-            if todo.todo_type == "AGENT" and not todo.done:
-                op_send = row.operator("agent.send_todo_to_agent", text="", icon="PLAY")
-                op_send.index = i
-
-            op_del = row.operator("agent.remove_todo", text="", icon="X")
-            op_del.index = i
-
-        if len(state.todos) == 0:
-            todo_box.label(text="暂无待办事项", icon="INFO")
-
-        add_row = todo_box.row(align=True)
-        add_row.prop(state, "todo_type_input", text="")
-        add_row.prop(state, "todo_input", text="")
-        add_row.operator("agent.add_todo", text="", icon="ADD")
 
     def invoke(self, context, event):
         prefs = get_preferences()
@@ -487,15 +543,114 @@ class AGENT_OT_OpenChat(Operator):
 
         state = _get_state()
         if len(state.messages) == 0:
-            _add_message(
-                "system",
-                "你好！我是 Blender AI 助手，可以帮你创建物体、设置材质、执行代码等。",
-            )
+            _add_message("system", "你好！我是 Blender AI 助手。在下方输入你的需求，我会直接操作 Blender 完成。")
 
-        return context.window_manager.invoke_props_dialog(self, width=500)
+        return context.window_manager.invoke_props_dialog(self, width=700)
 
 
+# ========== N Panel 侧边栏 ==========
 
+
+class AGENT_PT_MainPanel(Panel):
+    bl_label = "🤖 Blender Agent"
+    bl_idname = "AGENT_PT_main_panel"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Agent"
+
+    def draw(self, context):
+        layout = self.layout
+        state = _get_state()
+        prefs = get_preferences()
+
+        if not prefs.api_key:
+            box = layout.box()
+            box.label(text="⚠️ 请先配置 API Key", icon='ERROR')
+            box.operator("agent.open_settings", text="打开设置", icon='PREFERENCES')
+            return
+
+        if len(state.messages) == 0:
+            layout.label(text="你好！在下方输入需求，我会直接操作 Blender。", icon='INFO')
+
+        box = layout.box()
+        row = box.row()
+        row.label(text="对话", icon='CONSOLE')
+        row.operator("agent.clear_history", text="", icon='TRASH')
+
+        box.template_list(
+            "AGENT_UL_message_list",
+            "chat_messages",
+            state,
+            "messages",
+            state,
+            "active_message_index",
+            rows=8,
+            maxrows=15,
+        )
+
+        if state.is_processing:
+            layout.label(text="⏳ AI 正在思考...", icon='SORTTIME')
+        else:
+            row = layout.row(align=True)
+            row.prop(state, "input_text", text="")
+            row.operator("agent.send_message", text="", icon='PLAY')
+
+        if state.pending_code:
+            code_box = layout.box()
+            code_box.label(text="⚠️ 待确认代码:", icon='ERROR')
+            code_box.label(text=state.pending_code_desc)
+            code_preview = state.pending_code[:500]
+            for line in code_preview.split("\n")[:10]:
+                code_box.label(text=f"  {line}")
+            if len(state.pending_code) > 500:
+                code_box.label(text="  ...")
+            row = code_box.row()
+            op_yes = row.operator("agent.confirm_code", text="✅ 执行", icon='CHECKMARK')
+            op_yes.approved = True
+            op_no = row.operator("agent.confirm_code", text="❌ 取消", icon='X')
+            op_no.approved = False
+
+        row = layout.row(align=True)
+        row.operator("agent.open_settings", text="设置", icon='PREFERENCES')
+        row.operator("agent.open_chat", text="弹窗模式", icon='WINDOW')
+
+
+class AGENT_PT_TodoPanel(Panel):
+    bl_label = "📋 TODO List"
+    bl_idname = "AGENT_PT_todo_panel"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Agent"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        layout = self.layout
+        state = _get_state()
+
+        for i, todo in enumerate(state.todos):
+            row = layout.row(align=True)
+            icon = "CHECKMARK" if todo.done else "CHECKBOX_DEHLT"
+            op_toggle = row.operator("agent.toggle_todo", text="", icon=icon)
+            op_toggle.index = i
+
+            type_icon = "🤖" if todo.todo_type == "AGENT" else "👤"
+            strike = "✓ " if todo.done else ""
+            row.label(text=f"{type_icon} {strike}{todo.content[:80]}")
+
+            if todo.todo_type == "AGENT" and not todo.done:
+                op_send = row.operator("agent.send_todo_to_agent", text="", icon='PLAY')
+                op_send.index = i
+
+            op_del = row.operator("agent.remove_todo", text="", icon='X')
+            op_del.index = i
+
+        if len(state.todos) == 0:
+            layout.label(text="暂无待办事项", icon='INFO')
+
+        add_row = layout.row(align=True)
+        add_row.prop(state, "todo_type_input", text="")
+        add_row.prop(state, "todo_input", text="")
+        add_row.operator("agent.add_todo", text="", icon='ADD')
 
 
 # ========== 注册 ==========
@@ -505,15 +660,20 @@ classes = [
     ChatMessage,
     TodoItem,
     AgentState,
+    AGENT_UL_MessageList,
     AGENT_OT_SendMessage,
     AGENT_OT_ConfirmCode,
     AGENT_OT_ClearHistory,
     AGENT_OT_OpenSettings,
+    AGENT_OT_CopyMessage,
+    AGENT_OT_ViewFullMessage,
     AGENT_OT_AddTodo,
     AGENT_OT_RemoveTodo,
     AGENT_OT_ToggleTodo,
     AGENT_OT_SendTodoToAgent,
     AGENT_OT_OpenChat,
+    AGENT_PT_MainPanel,
+    AGENT_PT_TodoPanel,
 ]
 
 
@@ -527,7 +687,7 @@ def register():
 def unregister():
     global _agent
     _agent = None
-    
+
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
 
