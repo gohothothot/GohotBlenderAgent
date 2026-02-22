@@ -31,7 +31,15 @@ class BlenderAgentPreferences(AddonPreferences):
         items=[
             ("claude-sonnet-4-5", "Claude Sonnet 4.5", "平衡性能和速度"),
             ("claude-opus-4-5-20251101", "Claude Opus 4.5", "最强性能"),
+            ("claude-opus-4-5-kiro", "Claude Opus 4.5 Kiro", "Kiro 优化版"),
+            ("claude-opus-4-5-max", "Claude Opus 4.5 Max", "最大上下文"),
+            ("claude-opus-4-6-kiro", "Claude Opus 4.6 Kiro", "最新 Kiro 版"),
             ("claude-haiku-4-5", "Claude Haiku 4.5", "最快速度"),
+            ("gpt-5.3-codex", "GPT-5.3 Codex", "400K上下文 代码专精"),
+            ("gemini-3-flash-preview", "Gemini 3 Flash", "1M上下文 快速"),
+            ("gemini-3-pro-preview", "Gemini 3 Pro", "1M上下文 强性能"),
+            ("gemini-3-pro-image-preview", "Gemini 3 Pro Image", "1M上下文 支持图片输出"),
+            ("glm-4.7", "GLM 4.7", "智谱 128K上下文"),
         ],
         default="claude-sonnet-4-5",
     )
@@ -94,15 +102,38 @@ class ChatMessage(PropertyGroup):
     is_code: BoolProperty(name="Is Code", default=False)
 
 
+class TodoItem(PropertyGroup):
+    content: StringProperty(name="Content", default="")
+    done: BoolProperty(name="Done", default=False)
+    todo_type: EnumProperty(
+        name="Type",
+        items=[
+            ("USER", "用户", "用户自己要做的事"),
+            ("AGENT", "Agent", "让 Agent 去做的事"),
+        ],
+        default="USER",
+    )
+
+
 class AgentState(PropertyGroup):
-    """Agent 状态"""
 
     messages: CollectionProperty(type=ChatMessage)
+    todos: CollectionProperty(type=TodoItem)
+    active_todo_index: IntProperty(name="Active Todo", default=0)
     input_text: StringProperty(name="Input", default="")
     is_processing: BoolProperty(name="Processing", default=False)
     pending_code: StringProperty(name="Pending Code", default="")
     pending_code_desc: StringProperty(name="Pending Code Desc", default="")
     pending_tool_id: StringProperty(name="Pending Tool ID", default="")
+    todo_input: StringProperty(name="Todo Input", default="")
+    todo_type_input: EnumProperty(
+        name="Todo Type",
+        items=[
+            ("USER", "👤 用户", "用户自己要做的事"),
+            ("AGENT", "🤖 Agent", "让 Agent 去做的事"),
+        ],
+        default="USER",
+    )
 
 
 # ========== 全局 Agent 实例 ==========
@@ -266,6 +297,82 @@ class AGENT_OT_OpenSettings(Operator):
         return {"FINISHED"}
 
 
+class AGENT_OT_AddTodo(Operator):
+    bl_idname = "agent.add_todo"
+    bl_label = "添加 TODO"
+
+    def execute(self, context):
+        state = _get_state()
+        text = state.todo_input.strip()
+        if not text:
+            return {"CANCELLED"}
+        item = state.todos.add()
+        item.content = text
+        item.todo_type = state.todo_type_input
+        item.done = False
+        state.todo_input = ""
+        state.active_todo_index = len(state.todos) - 1
+        for area in context.screen.areas:
+            area.tag_redraw()
+        return {"FINISHED"}
+
+
+class AGENT_OT_RemoveTodo(Operator):
+    bl_idname = "agent.remove_todo"
+    bl_label = "删除 TODO"
+
+    index: IntProperty()
+
+    def execute(self, context):
+        state = _get_state()
+        if 0 <= self.index < len(state.todos):
+            state.todos.remove(self.index)
+            if state.active_todo_index >= len(state.todos):
+                state.active_todo_index = max(0, len(state.todos) - 1)
+        for area in context.screen.areas:
+            area.tag_redraw()
+        return {"FINISHED"}
+
+
+class AGENT_OT_ToggleTodo(Operator):
+    bl_idname = "agent.toggle_todo"
+    bl_label = "切换完成状态"
+
+    index: IntProperty()
+
+    def execute(self, context):
+        state = _get_state()
+        if 0 <= self.index < len(state.todos):
+            state.todos[self.index].done = not state.todos[self.index].done
+        for area in context.screen.areas:
+            area.tag_redraw()
+        return {"FINISHED"}
+
+
+class AGENT_OT_SendTodoToAgent(Operator):
+    bl_idname = "agent.send_todo_to_agent"
+    bl_label = "让 Agent 执行"
+
+    index: IntProperty()
+
+    def execute(self, context):
+        state = _get_state()
+        if 0 <= self.index < len(state.todos):
+            todo = state.todos[self.index]
+            if state.is_processing:
+                self.report({"WARNING"}, "Agent 正在处理中...")
+                return {"CANCELLED"}
+            agent = get_agent()
+            if agent is None:
+                self.report({"ERROR"}, "请先配置 API Key")
+                return {"CANCELLED"}
+            msg = f"请帮我完成这个任务：{todo.content}"
+            _add_message("user", msg)
+            state.is_processing = True
+            agent.send_message(msg)
+        return {"FINISHED"}
+
+
 class AGENT_OT_OpenChat(Operator):
     bl_idname = "agent.open_chat"
     bl_label = "打开 AI 助手"
@@ -344,6 +451,35 @@ class AGENT_OT_OpenChat(Operator):
         row.operator("agent.clear_history", text="清空对话", icon="TRASH")
         row.operator("agent.open_settings", text="设置", icon="PREFERENCES")
 
+        layout.separator()
+        todo_box = layout.box()
+        todo_box.label(text="📋 TODO List", icon="LINENUMBERS_ON")
+
+        for i, todo in enumerate(state.todos):
+            row = todo_box.row(align=True)
+            icon = "CHECKMARK" if todo.done else "CHECKBOX_DEHLT"
+            op_toggle = row.operator("agent.toggle_todo", text="", icon=icon)
+            op_toggle.index = i
+
+            type_icon = "🤖" if todo.todo_type == "AGENT" else "👤"
+            strike = "✓ " if todo.done else ""
+            row.label(text=f"{type_icon} {strike}{todo.content[:50]}")
+
+            if todo.todo_type == "AGENT" and not todo.done:
+                op_send = row.operator("agent.send_todo_to_agent", text="", icon="PLAY")
+                op_send.index = i
+
+            op_del = row.operator("agent.remove_todo", text="", icon="X")
+            op_del.index = i
+
+        if len(state.todos) == 0:
+            todo_box.label(text="暂无待办事项", icon="INFO")
+
+        add_row = todo_box.row(align=True)
+        add_row.prop(state, "todo_type_input", text="")
+        add_row.prop(state, "todo_input", text="")
+        add_row.operator("agent.add_todo", text="", icon="ADD")
+
     def invoke(self, context, event):
         prefs = get_preferences()
         if prefs.api_key:
@@ -367,11 +503,16 @@ class AGENT_OT_OpenChat(Operator):
 classes = [
     BlenderAgentPreferences,
     ChatMessage,
+    TodoItem,
     AgentState,
     AGENT_OT_SendMessage,
     AGENT_OT_ConfirmCode,
     AGENT_OT_ClearHistory,
     AGENT_OT_OpenSettings,
+    AGENT_OT_AddTodo,
+    AGENT_OT_RemoveTodo,
+    AGENT_OT_ToggleTodo,
+    AGENT_OT_SendTodoToAgent,
     AGENT_OT_OpenChat,
 ]
 

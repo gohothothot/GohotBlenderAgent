@@ -73,16 +73,27 @@ class MCPBridgeServer:
                     print(f"[MCP Bridge] 错误: {e}")
 
     def _handle_client(self, client):
-        """处理客户端请求"""
         try:
-            data = client.recv(4096).decode("utf-8")
+            chunks = []
+            while True:
+                try:
+                    chunk = client.recv(65536)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    if len(chunk) < 65536:
+                        break
+                except socket.timeout:
+                    break
+            data = b"".join(chunks).decode("utf-8")
             if data:
                 request = json.loads(data)
                 result = self._execute_in_main_thread(request)
-                client.send(json.dumps(result).encode("utf-8"))
+                response = json.dumps(result).encode("utf-8")
+                client.sendall(response)
         except Exception as e:
             error_response = {"success": False, "error": str(e)}
-            client.send(json.dumps(error_response).encode("utf-8"))
+            client.sendall(json.dumps(error_response).encode("utf-8"))
         finally:
             client.close()
 
@@ -109,7 +120,7 @@ class MCPBridgeServer:
         bpy.app.timers.register(do_action)
 
         try:
-            result = result_queue.get(timeout=5.0)
+            result = result_queue.get(timeout=30.0)
             # 转换格式以兼容旧 MCP
             if result.get("success"):
                 return {"success": True, "data": result.get("result")}

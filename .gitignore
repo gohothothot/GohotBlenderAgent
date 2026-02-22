@@ -17,6 +17,10 @@ __pycache__/
 # Logs
 *.log
 agent_error.log
+logs/
+
+# Knowledge base (local data)
+knowledge/
 
 # Cache
 .ruff_cache/
@@ -27,3 +31,4 @@ Thumbs.db
 
 # Temp
 *.tmp
+test_write.txt
