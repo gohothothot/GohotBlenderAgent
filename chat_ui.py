@@ -43,6 +43,7 @@ class BlenderAgentPreferences(AddonPreferences):
             ("glm-5", "GLM-5", "智谱最新"),
         ],
         default="claude-sonnet-4-5",
+    )
 
     custom_model: StringProperty(
         name="自定义模型",
