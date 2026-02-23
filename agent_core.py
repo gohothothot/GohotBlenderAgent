@@ -42,11 +42,30 @@ def log_debug(message: str):
 
 
 def _truncate_tool_result(result_str: str, max_chars: int = 4000) -> str:
-    """截断过大的工具结果，防止 API 请求体超限"""
     if len(result_str) <= max_chars:
         return result_str
     truncated = result_str[:max_chars]
     return truncated + f"\n...[结果已截断，原始长度 {len(result_str)} 字符]"
+
+
+def _parse_api_error(status_code: int, error_body: str) -> str:
+    try:
+        err_json = json.loads(error_body)
+        msg = err_json.get("error", {}).get("message", "")
+        if msg:
+            return msg
+    except (json.JSONDecodeError, AttributeError):
+        pass
+    return error_body[:500]
+
+
+def _is_permanent_error(error_body: str) -> bool:
+    permanent_keywords = ["卡池被封", "账户余额", "invalid_api_key", "authentication_error", "permission_denied"]
+    body_lower = error_body.lower()
+    for kw in permanent_keywords:
+        if kw.lower() in body_lower:
+            return True
+    return False
 
 
 class BlenderAgent:
@@ -191,48 +210,71 @@ Driver：frame*0.01(线性), sin(frame*0.1)(波动)
         log_debug(f"Request payload size: {len(data)} bytes")
 
         max_retries = 3
+        backoff_times = [5, 15, 30]
+        last_error_msg = ""
+
         for attempt in range(max_retries):
             try:
                 req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-                log_debug(f"Sending API request (attempt {attempt + 1}/{max_retries})...")
+                log_debug(f"API request attempt {attempt + 1}/{max_retries}...")
                 with urllib.request.urlopen(req, timeout=120) as response:
                     response_text = response.read().decode("utf-8")
                     log_debug(f"API response received, length: {len(response_text)}")
                     return json.loads(response_text)
             except urllib.error.HTTPError as e:
                 error_body = e.read().decode("utf-8")
-                error_msg = f"API HTTP错误 {e.code}: {error_body}"
-                log_error(error_msg)
-                try:
-                    from . import action_log
-                    action_log.log_error(f"API_HTTP_{e.code}", error_msg[:2000])
-                except Exception:
-                    pass
-                # 413 请求体过大
+                friendly_msg = _parse_api_error(e.code, error_body)
+                last_error_msg = f"API {e.code}: {friendly_msg}"
+                log_error(f"API HTTP {e.code}: {error_body[:1000]}")
+
                 if e.code == 413:
                     raise Exception(f"请求体过大（{len(data)} bytes），工具返回数据量超限。请减少查询范围。")
-                # 500/503/529 可重试
+
+                if _is_permanent_error(error_body):
+                    try:
+                        from . import action_log
+                        action_log.log_error(f"API_HTTP_{e.code}", last_error_msg)
+                    except Exception:
+                        pass
+                    raise Exception(last_error_msg)
+
                 if e.code in (500, 502, 503, 529) and attempt < max_retries - 1:
-                    wait = (attempt + 1) * 2
+                    wait = backoff_times[attempt]
                     log_debug(f"服务器错误 {e.code}，{wait}秒后重试...")
                     time.sleep(wait)
                     continue
-                raise Exception(error_msg)
+
+                try:
+                    from . import action_log
+                    action_log.log_error(f"API_HTTP_{e.code}", last_error_msg)
+                except Exception:
+                    pass
+                raise Exception(last_error_msg)
             except urllib.error.URLError as e:
-                error_msg = f"网络错误: {e.reason}"
-                log_error(error_msg)
+                last_error_msg = f"网络错误: {e.reason}"
+                log_error(last_error_msg)
                 if attempt < max_retries - 1:
-                    wait = (attempt + 1) * 2
+                    wait = backoff_times[attempt]
                     log_debug(f"网络错误，{wait}秒后重试...")
                     time.sleep(wait)
                     continue
-                raise Exception(error_msg)
+                try:
+                    from . import action_log
+                    action_log.log_error("network_error", last_error_msg)
+                except Exception:
+                    pass
+                raise Exception(last_error_msg)
             except Exception as e:
-                error_msg = f"未知错误: {str(e)}"
-                log_error(error_msg)
-                raise Exception(error_msg)
+                last_error_msg = f"未知错误: {str(e)}"
+                log_error(last_error_msg)
+                raise Exception(last_error_msg)
 
-        raise Exception("API 调用失败，已达最大重试次数")
+        try:
+            from . import action_log
+            action_log.log_error("max_retries", last_error_msg)
+        except Exception:
+            pass
+        raise Exception(f"API 调用失败（重试{max_retries}次）: {last_error_msg}")
 
     def send_message(self, user_message: str):
         thread = threading.Thread(target=self._process_message, args=(user_message,))
