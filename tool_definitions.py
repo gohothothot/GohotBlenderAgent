@@ -980,6 +980,58 @@ TOOLS = [
             "required": ["index"]
         }
     },
+    # ----- 文件系统工具 -----
+    {
+        "name": "file_read",
+        "description": "读取指定文件的内容（支持文本文件、配置文件、代码文件等）",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "文件绝对路径或相对于项目根目录的路径"},
+                "encoding": {"type": "string", "description": "编码格式，默认 utf-8"},
+                "max_lines": {"type": "integer", "description": "最大读取行数，默认 500"}
+            },
+            "required": ["path"]
+        }
+    },
+    {
+        "name": "file_write",
+        "description": "写入内容到指定文件（创建或覆盖）",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "文件路径"},
+                "content": {"type": "string", "description": "要写入的内容"},
+                "encoding": {"type": "string", "description": "编码格式，默认 utf-8"},
+                "append": {"type": "boolean", "description": "是否追加模式，默认 false"}
+            },
+            "required": ["path", "content"]
+        }
+    },
+    {
+        "name": "file_list",
+        "description": "列出指定目录下的文件和子目录",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "目录路径，默认为项目根目录"},
+                "pattern": {"type": "string", "description": "文件名匹配模式（如 *.py）"},
+                "recursive": {"type": "boolean", "description": "是否递归列出子目录，默认 false"}
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "file_read_project",
+        "description": "读取当前 Blender 项目相关文件（.blend 同目录下的文件）",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "filename": {"type": "string", "description": "文件名（相对于 .blend 文件所在目录）"}
+            },
+            "required": ["filename"]
+        }
+    },
 ]
 
 
@@ -1085,6 +1137,112 @@ def _meshy_image_to_3d(image_url: str) -> dict:
         return {"success": False, "result": None, "error": f"创建任务失败: {str(e)}"}
 
 
+# ========== 文件系统工具 ==========
+
+def _file_read(path: str, encoding: str = "utf-8", max_lines: int = 500) -> dict:
+    """读取文件内容"""
+    import os
+    try:
+        # 支持相对路径（相对于插件目录）
+        if not os.path.isabs(path):
+            base = os.path.dirname(__file__)
+            path = os.path.join(base, path)
+        if not os.path.exists(path):
+            return {"success": False, "result": None, "error": f"文件不存在: {path}"}
+        if not os.path.isfile(path):
+            return {"success": False, "result": None, "error": f"不是文件: {path}"}
+        with open(path, "r", encoding=encoding, errors="replace") as f:
+            lines = f.readlines()[:max_lines]
+        content = "".join(lines)
+        truncated = len(lines) >= max_lines
+        return {
+            "success": True,
+            "result": {
+                "path": path,
+                "content": content,
+                "lines": len(lines),
+                "truncated": truncated,
+            },
+            "error": None,
+        }
+    except Exception as e:
+        return {"success": False, "result": None, "error": str(e)}
+
+
+def _file_write(path: str, content: str, encoding: str = "utf-8", append: bool = False) -> dict:
+    """写入文件"""
+    import os
+    try:
+        if not os.path.isabs(path):
+            base = os.path.dirname(__file__)
+            path = os.path.join(base, path)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        mode = "a" if append else "w"
+        with open(path, mode, encoding=encoding) as f:
+            f.write(content)
+        action = "追加" if append else "写入"
+        return {
+            "success": True,
+            "result": f"已{action}文件: {path} ({len(content)} 字符)",
+            "error": None,
+        }
+    except Exception as e:
+        return {"success": False, "result": None, "error": str(e)}
+
+
+def _file_list(path: str = "", pattern: str = "", recursive: bool = False) -> dict:
+    """列出目录内容"""
+    import os
+    import fnmatch
+    try:
+        if not path or not os.path.isabs(path):
+            base = os.path.dirname(__file__)
+            path = os.path.join(base, path) if path else base
+        if not os.path.isdir(path):
+            return {"success": False, "result": None, "error": f"目录不存在: {path}"}
+        entries = []
+        if recursive:
+            for root, dirs, files in os.walk(path):
+                # 跳过隐藏目录和 __pycache__
+                dirs[:] = [d for d in dirs if not d.startswith(".") and d != "__pycache__"]
+                for f in files:
+                    if pattern and not fnmatch.fnmatch(f, pattern):
+                        continue
+                    rel = os.path.relpath(os.path.join(root, f), path)
+                    entries.append({"name": rel, "type": "file"})
+                if len(entries) > 200:
+                    break
+        else:
+            for name in sorted(os.listdir(path)):
+                if name.startswith(".") or name == "__pycache__":
+                    continue
+                if pattern and not fnmatch.fnmatch(name, pattern):
+                    continue
+                full = os.path.join(path, name)
+                entries.append({
+                    "name": name,
+                    "type": "dir" if os.path.isdir(full) else "file",
+                })
+        return {"success": True, "result": entries, "error": None}
+    except Exception as e:
+        return {"success": False, "result": None, "error": str(e)}
+
+
+def _file_read_project(filename: str) -> dict:
+    """读取 Blender 项目同目录下的文件"""
+    try:
+        blend_path = bpy.data.filepath
+        if not blend_path:
+            return {"success": False, "result": None, "error": "当前 Blender 文件未保存，无法确定项目目录"}
+        import os
+        project_dir = os.path.dirname(blend_path)
+        target = os.path.join(project_dir, filename)
+        return _file_read(target)
+    except Exception as e:
+        return {"success": False, "result": None, "error": str(e)}
+
+
+
 def execute_tool(tool_name: str, arguments: dict) -> dict:
     """
     执行工具并返回结果
@@ -1165,6 +1323,14 @@ def execute_tool(tool_name: str, arguments: dict) -> dict:
                 return func(**arguments)
             else:
                 return {"success": False, "result": None, "error": f"未知着色器工具: {tool_name}"}
+        elif tool_name == "file_read":
+            return _file_read(**arguments)
+        elif tool_name == "file_write":
+            return _file_write(**arguments)
+        elif tool_name == "file_list":
+            return _file_list(**arguments)
+        elif tool_name == "file_read_project":
+            return _file_read_project(**arguments)
         else:
             return {"success": False, "result": None, "error": f"未知工具: {tool_name}"}
     except Exception as e:

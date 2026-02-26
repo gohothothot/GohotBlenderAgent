@@ -100,8 +100,8 @@ class MCPBridgeServer:
 
         def do_action():
             try:
-                from . import tools
-                result = tools.execute_tool(action, params)
+                from . import tool_definitions
+                result = tool_definitions.execute_tool(action, params)
                 result_queue.put(result)
             except Exception as e:
                 result_queue.put({"success": False, "error": str(e)})

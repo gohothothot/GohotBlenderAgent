@@ -51,6 +51,17 @@ class BlenderAgentPreferences(AddonPreferences):
         default="",
     )
 
+    agent_mode: EnumProperty(
+        name="Agent 模式",
+        description="选择 Agent 工具调用模式",
+        items=[
+            ("native", "Native Tool Use", "使用 API 原生 tool_use（Anthropic/OpenAI 标准）"),
+            ("structured", "Structured XML", "LLM 生成文本 + XML 标签，外部解析器触发工具（更省 token，兼容性更好）"),
+        ],
+        default="native",
+    )
+
+
     meshy_api_key: StringProperty(
         name="Meshy API Key",
         description="你的 Meshy AI API Key（从 meshy.ai 获取）",
@@ -81,6 +92,12 @@ class BlenderAgentPreferences(AddonPreferences):
         if not self.api_key:
             box.label(text="⚠️ 请填写 Claude API Key 才能使用 AI 助手", icon='ERROR')
 
+        layout.separator()
+        layout.label(text="⚙️ Agent 设置", icon='TOOL_SETTINGS')
+        box = layout.box()
+        box.prop(self, "agent_mode")
+        if self.agent_mode == "structured":
+            box.label(text="ℹ️ XML 模式：LLM 生成文本 + XML 标签，更省 token", icon='INFO')
         layout.separator()
 
         layout.label(text="🎨 Meshy AI 配置", icon='MESH_MONKEY')
@@ -143,31 +160,63 @@ class AgentState(PropertyGroup):
 # ========== Agent 实例管理 ==========
 
 _agent = None
+_agent_config_key = None  # 用于检测配置变更
 
 
 def get_agent():
-    global _agent
+    global _agent, _agent_config_key
     prefs = get_preferences()
 
     if not prefs.api_key:
         return None
 
     model = prefs.custom_model if prefs.custom_model else prefs.model
+    config_key = f"{prefs.api_base}|{prefs.api_key}|{model}|{prefs.agent_mode}"
 
-    if _agent is None or _agent.api_base != prefs.api_base or _agent.api_key != prefs.api_key or _agent.model != model:
-        from .agent_core import BlenderAgent
-        _agent = BlenderAgent(
+    if _agent is None or _agent_config_key != config_key:
+        from .core.llm import LLMConfig
+
+        config = LLMConfig(
             api_base=prefs.api_base,
             api_key=prefs.api_key,
             model=model,
         )
+
+        if prefs.agent_mode == "structured":
+            from .core.structured_agent import StructuredAgent
+            _agent = StructuredAgent(config=config)
+        else:
+            from .core.agent import BlenderAgent
+            _agent = BlenderAgent(config=config)
+
         _agent.on_message = _on_agent_message
         _agent.on_tool_call = _on_tool_call
-        _agent.on_code_confirm = _on_code_confirm
         _agent.on_error = _on_error
+        _agent.on_plan = _on_plan
+        _agent_config_key = config_key
 
     return _agent
 
+
+def _execute_in_main_thread(func, *args):
+    """在 Blender 主线程执行函数"""
+    import queue
+    result_queue = queue.Queue()
+
+    def do_execute():
+        try:
+            result = func(*args) if args else func()
+            result_queue.put(result)
+        except Exception as e:
+            result_queue.put({"success": False, "result": None, "error": str(e)})
+        return None
+
+    bpy.app.timers.register(do_execute)
+
+    try:
+        return result_queue.get(timeout=30.0)
+    except Exception:
+        return {"success": False, "result": None, "error": "操作超时（30秒）"}
 
 def _get_state() -> AgentState:
     return bpy.context.scene.blender_agent
@@ -195,6 +244,9 @@ def _on_tool_call(tool_name: str, args: dict):
     args_preview = json.dumps(args, ensure_ascii=False)[:200] if args else ""
     _add_message("system", f"🔧 调用工具: {tool_name}\n{args_preview}")
 
+
+def _on_plan(plan_text: str):
+    _add_message("system", f"📋 {plan_text}")
 
 def _on_code_confirm(code: str, description: str, callback):
     state = _get_state()
