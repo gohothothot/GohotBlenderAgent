@@ -27,6 +27,7 @@ from .tools import (
 )
 from .tool_policies import normalize_tool_args
 from .shader_read_planner import plan_shader_inspect
+from .safety_guard import looks_like_python_script, looks_like_script_output
 
 
 def _log(msg: str):
@@ -93,6 +94,7 @@ class BlenderAgent:
         self.on_tool_call: Optional[Callable] = None
         self.on_error: Optional[Callable] = None
         self.on_plan: Optional[Callable] = None
+        self.on_permission_request: Optional[Callable] = None
 
         # 工具加载
         self._tools = None
@@ -185,12 +187,12 @@ class BlenderAgent:
             self._log_action("error", error_msg)
             self._fire_callback(self.on_error, error_msg)
 
-    def _handle_response(self, response: LLMResponse, tools: list, request_id: int):
+    def _handle_response(self, response: LLMResponse, tools: list, request_id: int, allow_repair: bool = True):
         """处理 LLM 响应"""
         if self._is_request_cancelled(request_id):
             return
-        # 文本部分
-        if response.text:
+        # 文本部分：若本轮包含工具调用，则不展示中间文本，避免“伪代码步骤”污染 UI
+        if response.text and (not response.has_tool_calls):
             self._fire_callback(self.on_message, "assistant", response.text)
             self._log_action("message", response.text)
 
@@ -202,11 +204,23 @@ class BlenderAgent:
             self._execute_tools(response.tool_calls, tools, request_id)
         else:
             # 无工具调用 — 记录并结束
-            if response.text:
-                self.conversation_history.append(
-                    {"role": "assistant", "content": response.text}
-                )
-            self._log_action("end", response.text[:200] if response.text else "")
+            if response.text and (looks_like_python_script(response.text) or looks_like_script_output(response.text)):
+                if allow_repair:
+                    _log("Detected script-like output without tools, forcing tool retry")
+                    self._force_tool_retry(request_id, tools)
+                    return
+                err = "检测到模型返回脚本/伪代码内容，已拦截。请重试（系统将强制使用 MCP 工具）。"
+                self._fire_callback(self.on_error, err)
+                self._log_action("error", err)
+                return
+            if allow_repair:
+                _log("No tool calls returned, forcing tool retry")
+                self._force_tool_retry(request_id, tools)
+                return
+            err = "模型未返回任何工具调用，任务未执行。建议切换模型或改用 Structured XML 模式后重试。"
+            self._fire_callback(self.on_error, err)
+            self._log_action("error", err)
+            self._log_action("end", err)
 
     def _execute_tools(self, tool_calls: list, tools: list, request_id: int):
         """执行工具调用"""
@@ -241,6 +255,21 @@ class BlenderAgent:
                     tc.id, "错误：execute_python 已被禁用。", is_error=True,
                 ))
                 continue
+            if result.get("result") == "NEEDS_PERMISSION_CONFIRMATION":
+                self._fire_callback(
+                    self.on_permission_request,
+                    result.get("tool_name", tc.name),
+                    result.get("arguments", normalized_args),
+                    result.get("risk", "high"),
+                    result.get("reason", "需要权限确认"),
+                )
+                self._log_action(
+                    "permission_wait",
+                    result.get("tool_name", tc.name),
+                    result.get("arguments", normalized_args),
+                    result.get("reason", "需要权限确认"),
+                )
+                return
 
             if result.get("result") == "NEEDS_VISION_ANALYSIS":
                 self._handle_vision(tc.id, result, request_id)
@@ -390,6 +419,27 @@ class BlenderAgent:
                 tool_id, f"场景分析失败: {e}", is_error=True,
             )
             self._continue_with_results([tool_result], self._tools, request_id)
+
+    def _force_tool_retry(self, request_id: int, tools: list):
+        if self._is_request_cancelled(request_id):
+            return
+        try:
+            repair_msg = (
+                "[系统纠偏] 你刚刚没有正确调用工具（或输出了脚本/伪代码），这是被禁止的。"
+                "必须改为调用 MCP 工具完成任务；禁止任何 Python 代码块、函数调用示例、代码围栏。"
+                "现在请立即输出 tool calls。"
+            )
+            self.conversation_history.append({"role": "user", "content": repair_msg})
+            response = self.llm.chat(
+                messages=self.conversation_history,
+                system=SYSTEM_PROMPT,
+                tools=tools,
+            )
+            if self._is_request_cancelled(request_id):
+                return
+            self._handle_response(response, tools, request_id, allow_repair=False)
+        except Exception as e:
+            self._fire_callback(self.on_error, f"纠偏重试失败: {e}")
 
     def _execute_in_main_thread(self, func, *args) -> dict:
         """在 Blender 主线程执行函数"""

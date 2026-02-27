@@ -34,6 +34,7 @@ from .tools import (
 from .xml_parser import parse as parse_xml, build_tool_catalog, validate_tool_call
 from .tool_policies import normalize_tool_args
 from .shader_read_planner import plan_shader_inspect
+from .safety_guard import looks_like_python_script, looks_like_script_output
 
 
 def _log(msg: str):
@@ -120,6 +121,7 @@ class StructuredAgent:
         self.on_tool_call: Optional[Callable] = None
         self.on_error: Optional[Callable] = None
         self.on_plan: Optional[Callable] = None
+        self.on_permission_request: Optional[Callable] = None
 
         # 工具
         self._tools = None
@@ -206,7 +208,7 @@ class StructuredAgent:
             self._log_action("error", error_msg)
             self._fire_callback(self.on_error, error_msg)
 
-    def _handle_structured_response(self, response: LLMResponse, tools: list, system: str, rounds: int, request_id: int):
+    def _handle_structured_response(self, response: LLMResponse, tools: list, system: str, rounds: int, request_id: int, allow_repair: bool = True):
         """解析 LLM 文本输出，提取并执行工具调用"""
         if self._is_request_cancelled(request_id):
             return
@@ -216,14 +218,28 @@ class StructuredAgent:
         parsed = parse_xml(raw_text)
         _log(f"Parsed: text={len(parsed.text)} chars, tool_calls={len(parsed.tool_calls)}")
 
-        # 显示纯文本部分
-        if parsed.text:
+        # 显示纯文本部分：有工具调用时不展示中间文本，避免 UI 出现伪代码步骤
+        if parsed.text and (not parsed.has_tool_calls):
             self._fire_callback(self.on_message, "assistant", parsed.text)
 
         if not parsed.has_tool_calls:
-            # 无工具调用 — 记录并结束
-            self.conversation_history.append({"role": "assistant", "content": raw_text})
-            self._log_action("end", parsed.text[:200])
+            if raw_text and (looks_like_python_script(raw_text) or looks_like_script_output(raw_text)):
+                if allow_repair:
+                    _log("Detected script-like output without XML tool_call, forcing retry")
+                    self._force_tool_retry(request_id, tools, system, rounds)
+                    return
+                err = "检测到模型返回脚本/伪代码内容，已拦截。请重试（系统将强制使用 MCP 工具）。"
+                self._fire_callback(self.on_error, err)
+                self._log_action("error", err)
+                return
+            if allow_repair:
+                _log("No XML tool_call found, forcing retry")
+                self._force_tool_retry(request_id, tools, system, rounds)
+                return
+            err = "模型未返回任何 XML 工具调用，任务未执行。建议切换模型或改用 Native Tool Use 模式后重试。"
+            self._fire_callback(self.on_error, err)
+            self._log_action("error", err)
+            self._log_action("end", err)
             return
 
         # 记录 assistant 原始输出（含 XML）
@@ -258,6 +274,21 @@ class StructuredAgent:
             self._log_action("tool", tc.name, normalized_args, result)
 
             if result.get("success"):
+                if result.get("result") == "NEEDS_PERMISSION_CONFIRMATION":
+                    self._fire_callback(
+                        self.on_permission_request,
+                        result.get("tool_name", tc.name),
+                        result.get("arguments", normalized_args),
+                        result.get("risk", "high"),
+                        result.get("reason", "需要权限确认"),
+                    )
+                    self._log_action(
+                        "permission_wait",
+                        result.get("tool_name", tc.name),
+                        result.get("arguments", normalized_args),
+                        result.get("reason", "需要权限确认"),
+                    )
+                    return
                 result_str = json.dumps(result.get("result"), ensure_ascii=False)
                 result_parts.append(f"✅ {tc.name}: {truncate_result(result_str)}")
             else:
@@ -292,6 +323,34 @@ class StructuredAgent:
 
         # 递归处理（可能还有工具调用）
         self._handle_structured_response(next_response, tools, system, rounds + 1, request_id=request_id)
+
+    def _force_tool_retry(self, request_id: int, tools: list, system: str, rounds: int):
+        if self._is_request_cancelled(request_id):
+            return
+        try:
+            repair_msg = (
+                "[系统纠偏] 你刚刚没有正确调用工具（或输出了脚本/伪代码），这是被禁止的。"
+                "必须改为使用 <tool_call> 调用 MCP 工具；禁止任何 Python 代码块、函数调用示例、代码围栏。"
+                "现在请立即输出至少一个 <tool_call>。"
+            )
+            self.conversation_history.append({"role": "user", "content": repair_msg})
+            response = self.llm.chat(
+                messages=self.conversation_history,
+                system=system,
+                tools=None,
+            )
+            if self._is_request_cancelled(request_id):
+                return
+            self._handle_structured_response(
+                response,
+                tools,
+                system,
+                rounds=rounds,
+                request_id=request_id,
+                allow_repair=False,
+            )
+        except Exception as e:
+            self._fire_callback(self.on_error, f"纠偏重试失败: {e}")
 
     def _maybe_expand_shader_inspect_args(self, tool_name: str, raw_args: dict, normalized_args: dict) -> dict:
         """Structured 模式下的 inspect 自动检索扩展"""

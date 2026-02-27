@@ -62,6 +62,46 @@ class BlenderAgentPreferences(AddonPreferences):
         ],
         default="native",
     )
+    auto_fallback_on_no_toolcall: BoolProperty(
+        name="无工具调用自动回退",
+        description="当当前模式未触发任何工具调用时，自动切换到另一种模式重试一次",
+        default=True,
+    )
+
+    ai_permission_level: EnumProperty(
+        name="AI 权限级别",
+        description="控制 Agent 执行 MCP 工具时的默认权限强度",
+        items=[
+            ("high", "高权限（推荐）", "默认放行大多数工具，仅高风险工具可选确认"),
+            ("balanced", "平衡", "中高风险工具执行前询问"),
+            ("conservative", "保守", "拦截高风险工具，仅放行低风险工具"),
+        ],
+        default="high",
+    )
+
+    confirm_high_risk_tools: BoolProperty(
+        name="高风险工具执行前确认",
+        description="高风险操作（删除、清空等）执行前弹窗确认",
+        default=True,
+    )
+
+    allow_destructive_tools: BoolProperty(
+        name="允许破坏性工具",
+        description="允许删除对象、清空节点等不可逆操作",
+        default=True,
+    )
+
+    allow_file_write_tools: BoolProperty(
+        name="允许文件写入工具",
+        description="允许 file_write 等写盘操作",
+        default=True,
+    )
+
+    allow_network_tools: BoolProperty(
+        name="允许网络/Meshy工具",
+        description="允许联网检索、网页分析与 Meshy 调用",
+        default=True,
+    )
 
 
     meshy_api_key: StringProperty(
@@ -98,8 +138,19 @@ class BlenderAgentPreferences(AddonPreferences):
         layout.label(text="⚙️ Agent 设置", icon='TOOL_SETTINGS')
         box = layout.box()
         box.prop(self, "agent_mode")
+        box.prop(self, "auto_fallback_on_no_toolcall")
         if self.agent_mode == "structured":
             box.label(text="ℹ️ XML 模式：LLM 生成文本 + XML 标签，更省 token", icon='INFO')
+        layout.separator()
+        layout.label(text="🔐 权限控制", icon='LOCKED')
+        sec = layout.box()
+        sec.prop(self, "ai_permission_level")
+        sec.prop(self, "confirm_high_risk_tools")
+        sec.prop(self, "allow_destructive_tools")
+        sec.prop(self, "allow_file_write_tools")
+        sec.prop(self, "allow_network_tools")
+        sec.label(text="说明：高风险操作会先请求授权，授权后自动继续。", icon='INFO')
+
         layout.separator()
 
         layout.label(text="🎨 Meshy AI 配置", icon='MESH_MONKEY')
@@ -147,7 +198,16 @@ class AgentState(PropertyGroup):
     is_processing: BoolProperty(name="Processing", default=False)
     pending_code: StringProperty(name="Pending Code", default="")
     pending_code_desc: StringProperty(name="Pending Code Desc", default="")
+    pending_permission_tool: StringProperty(name="Pending Permission Tool", default="")
+    pending_permission_args: StringProperty(name="Pending Permission Args", default="")
+    pending_permission_risk: StringProperty(name="Pending Permission Risk", default="")
+    pending_permission_reason: StringProperty(name="Pending Permission Reason", default="")
     pending_tool_id: StringProperty(name="Pending Tool ID", default="")
+    last_user_message: StringProperty(name="Last User Message", default="")
+    last_exec_status: StringProperty(name="Last Exec Status", default="idle")
+    last_exec_mode: StringProperty(name="Last Exec Mode", default="")
+    fallback_attempted: BoolProperty(name="Fallback Attempted", default=False)
+    request_had_tool_call: BoolProperty(name="Request Had Tool Call", default=False)
     todo_input: StringProperty(name="Todo Input", default="")
     todo_type_input: EnumProperty(
         name="Todo Type",
@@ -161,21 +221,29 @@ class AgentState(PropertyGroup):
 
 # ========== Agent 实例管理 ==========
 
-_agent = None
-_agent_config_key = None  # 用于检测配置变更
+_agents_cache = {}
 
 
-def get_agent():
-    global _agent, _agent_config_key
+def _bind_agent_callbacks(agent):
+    agent.on_message = _on_agent_message
+    agent.on_tool_call = _on_tool_call
+    agent.on_error = _on_error
+    agent.on_plan = _on_plan
+    agent.on_permission_request = _on_permission_request
+
+
+def get_agent(mode_override: str = ""):
+    global _agents_cache
     prefs = get_preferences()
 
     if not prefs.api_key:
         return None
 
     model = prefs.custom_model if prefs.custom_model else prefs.model
-    config_key = f"{prefs.api_base}|{prefs.api_key}|{model}|{prefs.agent_mode}"
+    mode = mode_override or prefs.agent_mode
+    config_key = f"{prefs.api_base}|{prefs.api_key}|{model}|{mode}"
 
-    if _agent is None or _agent_config_key != config_key:
+    if config_key not in _agents_cache:
         from .core.llm import LLMConfig
 
         config = LLMConfig(
@@ -184,20 +252,47 @@ def get_agent():
             model=model,
         )
 
-        if prefs.agent_mode == "structured":
+        if mode == "structured":
             from .core.structured_agent import StructuredAgent
-            _agent = StructuredAgent(config=config)
+            agent = StructuredAgent(config=config)
         else:
             from .core.agent import BlenderAgent
-            _agent = BlenderAgent(config=config)
+            agent = BlenderAgent(config=config)
 
-        _agent.on_message = _on_agent_message
-        _agent.on_tool_call = _on_tool_call
-        _agent.on_error = _on_error
-        _agent.on_plan = _on_plan
-        _agent_config_key = config_key
+        _bind_agent_callbacks(agent)
+        _agents_cache[config_key] = agent
 
-    return _agent
+    return _agents_cache.get(config_key)
+
+
+def _fallback_mode(mode: str) -> str:
+    return "structured" if mode == "native" else "native"
+
+
+def _send_message_with_mode(user_msg: str, mode: str):
+    agent = get_agent(mode_override=mode)
+    if agent is None:
+        return False
+    state = _get_state()
+    state.is_processing = True
+    state.last_exec_mode = mode
+    agent.send_message(user_msg)
+    return True
+
+
+def _draw_health_badge(layout, state: AgentState):
+    status = state.last_exec_status or "idle"
+    mode = state.last_exec_mode or "-"
+    if status == "ok":
+        layout.label(text=f"工具执行状态: 正常（模式: {mode}）", icon="CHECKMARK")
+    elif status == "fallback_running":
+        layout.label(text=f"工具执行状态: 回退重试中（模式: {mode}）", icon="FILE_REFRESH")
+    elif status in ("no_toolcall", "error"):
+        layout.label(text=f"工具执行状态: 未执行工具（模式: {mode}）", icon="ERROR")
+    elif status == "processing":
+        layout.label(text=f"工具执行状态: 执行中（模式: {mode}）", icon="SORTTIME")
+    else:
+        layout.label(text="工具执行状态: 待机", icon="INFO")
 
 
 def _execute_in_main_thread(func, *args):
@@ -243,6 +338,9 @@ def _on_agent_message(role: str, content: str):
 
 
 def _on_tool_call(tool_name: str, args: dict):
+    state = _get_state()
+    state.request_had_tool_call = True
+    state.last_exec_status = "ok"
     args_preview = json.dumps(args, ensure_ascii=False)[:200] if args else ""
     _add_message("system", f"🔧 调用工具: {tool_name}\n{args_preview}")
 
@@ -266,9 +364,41 @@ def _on_code_confirm(code: str, description: str, callback):
 
 
 def _on_error(error: str):
-    _add_message("system", f"❌ 错误: {error}")
     state = _get_state()
+    prefs = get_preferences()
+
+    no_toolcall_error = ("未返回任何工具调用" in error) or ("任务未执行" in error)
+    can_fallback = (
+        bool(getattr(prefs, "auto_fallback_on_no_toolcall", True))
+        and no_toolcall_error
+        and (not state.fallback_attempted)
+        and bool(state.last_user_message)
+    )
+    if can_fallback:
+        retry_mode = _fallback_mode(state.last_exec_mode or prefs.agent_mode)
+        state.fallback_attempted = True
+        state.last_exec_status = "fallback_running"
+        _add_message("system", f"♻️ 当前模式未触发工具调用，自动切换到 {retry_mode} 模式重试一次。")
+        if _send_message_with_mode(state.last_user_message, retry_mode):
+            return
+        _add_message("system", "❌ 自动回退失败：无法创建回退 Agent 实例。")
+
+    _add_message("system", f"❌ 错误: {error}")
     state.is_processing = False
+    state.last_exec_status = "no_toolcall" if no_toolcall_error else "error"
+
+
+def _on_permission_request(tool_name: str, args: dict, risk: str, reason: str):
+    state = _get_state()
+    state.pending_permission_tool = tool_name or ""
+    state.pending_permission_args = json.dumps(args or {}, ensure_ascii=False)
+    state.pending_permission_risk = risk or "high"
+    state.pending_permission_reason = reason or "该操作需要授权"
+    state.is_processing = False
+    _add_message(
+        "system",
+        f"🔐 需要权限确认：{state.pending_permission_tool}（风险: {state.pending_permission_risk}）\n{state.pending_permission_reason}",
+    )
 
 
 _pending_callback = None
@@ -350,8 +480,8 @@ class AGENT_OT_SendMessage(Operator):
             self.report({"WARNING"}, "Agent 正在处理中...")
             return {"CANCELLED"}
 
-        agent = get_agent()
-        if agent is None:
+        prefs = get_preferences()
+        if get_agent(mode_override=prefs.agent_mode) is None:
             self.report({"ERROR"}, "请先在插件设置中配置 API Key")
             return {"CANCELLED"}
 
@@ -359,9 +489,12 @@ class AGENT_OT_SendMessage(Operator):
         _add_message("user", user_msg)
 
         state.input_text = ""
-        state.is_processing = True
-
-        agent.send_message(user_msg)
+        state.last_user_message = user_msg
+        state.request_had_tool_call = False
+        state.fallback_attempted = False
+        state.last_exec_status = "processing"
+        state.last_exec_mode = prefs.agent_mode
+        _send_message_with_mode(user_msg, prefs.agent_mode)
 
         return {"FINISHED"}
 
@@ -373,14 +506,15 @@ class AGENT_OT_StopProcessing(Operator):
 
     def execute(self, context):
         state = _get_state()
-        agent = get_agent()
-        if agent and hasattr(agent, "cancel_current_request"):
-            try:
-                agent.cancel_current_request()
-            except Exception:
-                pass
+        for agent in list(_agents_cache.values()):
+            if agent and hasattr(agent, "cancel_current_request"):
+                try:
+                    agent.cancel_current_request()
+                except Exception:
+                    pass
 
         state.is_processing = False
+        state.last_exec_status = "idle"
         _add_message("system", "⏹️ 已请求中止当前任务。")
         self.report({"INFO"}, "已发送中止请求")
         return {"FINISHED"}
@@ -412,17 +546,66 @@ class AGENT_OT_ConfirmCode(Operator):
         return {"FINISHED"}
 
 
+class AGENT_OT_ConfirmPermission(Operator):
+    bl_idname = "agent.confirm_permission"
+    bl_label = "确认权限"
+
+    approved: BoolProperty(default=True)
+
+    def execute(self, context):
+        state = _get_state()
+        tool_name = state.pending_permission_tool
+        args_text = state.pending_permission_args or "{}"
+        args = {}
+        try:
+            args = json.loads(args_text)
+        except Exception:
+            args = {}
+
+        if self.approved and tool_name:
+            try:
+                from .permission_guard import approve_tool_once
+                approve_tool_once(tool_name, args)
+            except Exception as e:
+                self.report({"ERROR"}, f"授权失败: {e}")
+                return {"CANCELLED"}
+
+            _add_message("system", f"✅ 已授权一次：{tool_name}。Agent 将继续执行。")
+            resume_mode = state.last_exec_mode or get_preferences().agent_mode
+            agent = get_agent(mode_override=resume_mode)
+            if agent:
+                state.is_processing = True
+                state.last_exec_status = "processing"
+                resume_prompt = (
+                    f"权限已批准。请继续完成刚才任务。"
+                    f"你对工具 {tool_name} 使用参数 {args_text} 已获得一次性授权，"
+                    "请立即调用 MCP 工具并继续后续步骤。"
+                )
+                agent.send_message(resume_prompt)
+        else:
+            _add_message("system", f"🚫 已拒绝授权：{tool_name or '未知工具'}")
+
+        state.pending_permission_tool = ""
+        state.pending_permission_args = ""
+        state.pending_permission_risk = ""
+        state.pending_permission_reason = ""
+        return {"FINISHED"}
+
+
 class AGENT_OT_ClearHistory(Operator):
     bl_idname = "agent.clear_history"
     bl_label = "清空对话"
 
     def execute(self, context):
-        global _agent
+        global _agents_cache
         state = _get_state()
         state.messages.clear()
 
-        if _agent:
-            _agent.clear_history()
+        for agent in list(_agents_cache.values()):
+            try:
+                agent.clear_history()
+            except Exception:
+                pass
 
         _add_message("system", "对话已清空，开始新对话")
         return {"FINISHED"}
@@ -560,14 +743,18 @@ class AGENT_OT_SendTodoToAgent(Operator):
             if state.is_processing:
                 self.report({"WARNING"}, "Agent 正在处理中...")
                 return {"CANCELLED"}
-            agent = get_agent()
-            if agent is None:
+            prefs = get_preferences()
+            if get_agent(mode_override=prefs.agent_mode) is None:
                 self.report({"ERROR"}, "请先配置 API Key")
                 return {"CANCELLED"}
             msg = f"请帮我完成这个任务：{todo.content}"
             _add_message("user", msg)
-            state.is_processing = True
-            agent.send_message(msg)
+            state.last_user_message = msg
+            state.request_had_tool_call = False
+            state.fallback_attempted = False
+            state.last_exec_status = "processing"
+            state.last_exec_mode = prefs.agent_mode
+            _send_message_with_mode(msg, prefs.agent_mode)
         return {"FINISHED"}
 
 
@@ -605,6 +792,7 @@ class AGENT_OT_OpenChat(Operator):
             rows=8,
             maxrows=12,
         )
+        _draw_health_badge(layout, state)
 
         if state.pending_code:
             code_box = layout.box()
@@ -619,6 +807,18 @@ class AGENT_OT_OpenChat(Operator):
             op_yes = row.operator("agent.confirm_code", text="✅ 执行", icon="CHECKMARK")
             op_yes.approved = True
             op_no = row.operator("agent.confirm_code", text="❌ 取消", icon="X")
+            op_no.approved = False
+
+        if state.pending_permission_tool:
+            perm_box = layout.box()
+            perm_box.label(text="🔐 待确认高权限操作:", icon="LOCKED")
+            perm_box.label(text=f"工具: {state.pending_permission_tool}")
+            perm_box.label(text=f"风险: {state.pending_permission_risk}")
+            perm_box.label(text=state.pending_permission_reason[:180])
+            row = perm_box.row()
+            op_yes = row.operator("agent.confirm_permission", text="✅ 允许一次", icon="CHECKMARK")
+            op_yes.approved = True
+            op_no = row.operator("agent.confirm_permission", text="❌ 拒绝", icon="X")
             op_no.approved = False
 
         layout.separator()
@@ -689,6 +889,7 @@ class AGENT_PT_MainPanel(Panel):
             rows=8,
             maxrows=15,
         )
+        _draw_health_badge(layout, state)
 
         if state.is_processing:
             row = layout.row(align=True)
@@ -712,6 +913,18 @@ class AGENT_PT_MainPanel(Panel):
             op_yes = row.operator("agent.confirm_code", text="✅ 执行", icon='CHECKMARK')
             op_yes.approved = True
             op_no = row.operator("agent.confirm_code", text="❌ 取消", icon='X')
+            op_no.approved = False
+
+        if state.pending_permission_tool:
+            perm_box = layout.box()
+            perm_box.label(text="🔐 待确认高权限操作:", icon='LOCKED')
+            perm_box.label(text=f"工具: {state.pending_permission_tool}")
+            perm_box.label(text=f"风险: {state.pending_permission_risk}")
+            perm_box.label(text=state.pending_permission_reason[:180])
+            row = perm_box.row()
+            op_yes = row.operator("agent.confirm_permission", text="✅ 允许一次", icon='CHECKMARK')
+            op_yes.approved = True
+            op_no = row.operator("agent.confirm_permission", text="❌ 拒绝", icon='X')
             op_no.approved = False
 
         row = layout.row(align=True)
@@ -864,6 +1077,7 @@ classes = [
     AGENT_OT_SendMessage,
     AGENT_OT_StopProcessing,
     AGENT_OT_ConfirmCode,
+    AGENT_OT_ConfirmPermission,
     AGENT_OT_ClearHistory,
     AGENT_OT_OpenSettings,
     AGENT_OT_CopyMessage,
@@ -888,8 +1102,8 @@ def register():
 
 
 def unregister():
-    global _agent
-    _agent = None
+    global _agents_cache
+    _agents_cache = {}
 
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)

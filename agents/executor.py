@@ -16,6 +16,7 @@ from ..parsers.result_parser import summarize_tool_result
 from ..context.prompts import AgentPrompts
 from ..context.manager import ContextManager
 from ..tools.registry import get_registry
+from ..core.safety_guard import looks_like_python_script, looks_like_script_output
 from .shader_read_agent import ShaderReadAgent
 
 
@@ -193,6 +194,20 @@ class ExecutorAgent:
                 final_text = response.text
 
             if not response.has_tool_calls:
+                if round_i < (max_rounds - 1):
+                    if response.text and (looks_like_python_script(response.text) or looks_like_script_output(response.text)):
+                        _log("Detected script-like output without tools, forcing corrective retry")
+                    else:
+                        _log("No tool calls returned, forcing corrective retry")
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "[系统纠偏] 你没有正确调用工具。"
+                            "禁止输出 Python 代码、函数调用示例或代码块。"
+                            "你必须调用 MCP 工具完成任务。现在请立即发起工具调用。"
+                        ),
+                    })
+                    continue
                 break
 
             assistant_msg = self._llm.format_assistant_with_tool_calls(response)
@@ -201,6 +216,12 @@ class ExecutorAgent:
             tool_result_msgs = []
             for tc in response.tool_calls:
                 _log(f"Running tool: {tc.name}({list(tc.arguments.keys()) if tc.arguments else []})")
+                if tc.name == "execute_python":
+                    result = {"success": False, "result": None, "error": "execute_python 已被禁用，请改用 MCP 工具"}
+                    all_results.append({"tool": tc.name, "result": result})
+                    tool_msg = self._llm.format_tool_result(tc.id, result["error"], is_error=True)
+                    tool_result_msgs.append(tool_msg)
+                    continue
                 result = self._run_tool(tc.name, tc.arguments)
                 _log(f"Tool result: {tc.name} → success={result.get('success')}")
                 all_results.append({"tool": tc.name, "result": result})

@@ -80,7 +80,7 @@ INTENT_GROUPS = {
     "search":      ["search", "meta"],
     "query":       ["basic", "material", "scene", "meta"],
     # general = 常用工具子集（约30个，避免 payload 过大导致 API 500）
-    "general":     ["basic", "material", "scene", "search", "meta", "file"],
+    "general":     ["basic", "material", "scene", "shader", "search", "meta", "file"],
 }
 
 

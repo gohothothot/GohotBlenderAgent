@@ -8,6 +8,7 @@ Blender Agent Tools - 工具定义
 import bpy
 import json
 from typing import Any
+from .permission_guard import evaluate_tool_permission
 
 # ========== 工具定义 ==========
 # Claude Tool Use 格式：每个工具有 name, description, input_schema
@@ -1294,6 +1295,23 @@ def execute_tool(tool_name: str, arguments: dict) -> dict:
     返回格式: {"success": bool, "result": Any, "error": str|None}
     """
     try:
+        permission = evaluate_tool_permission(tool_name, arguments or {})
+        if not permission.get("allowed", True):
+            return {
+                "success": False,
+                "result": None,
+                "error": f"权限拦截: {permission.get('reason', '未授权')}",
+            }
+        if permission.get("requires_confirmation"):
+            return {
+                "success": True,
+                "result": "NEEDS_PERMISSION_CONFIRMATION",
+                "tool_name": tool_name,
+                "arguments": arguments or {},
+                "risk": permission.get("risk", "high"),
+                "reason": permission.get("reason", "需要确认"),
+            }
+
         if tool_name == "list_objects":
             return _list_objects()
         elif tool_name == "create_primitive":
