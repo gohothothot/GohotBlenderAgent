@@ -33,6 +33,7 @@ TOOL_GROUPS = {
         "shader_colorramp_set_interpolation",
         "shader_batch_add_nodes", "shader_batch_link_nodes",
         "shader_clear_nodes", "shader_get_material_summary",
+        "shader_search_index",
         "shader_get_node_sockets", "shader_list_available_nodes",
         "shader_create_procedural_material",
         "shader_preview_material", "shader_configure_eevee",

@@ -25,6 +25,8 @@ from .tools import (
     execute_tool,
     truncate_result,
 )
+from .tool_policies import normalize_tool_args
+from .shader_read_planner import plan_shader_inspect
 
 
 def _log(msg: str):
@@ -40,6 +42,7 @@ SYSTEM_PROMPT = """你是 Blender 场景的唯一操作者，拥有对 Blender �
 3. 禁止说"你可以"、"建议你"、"请手动"。你自己做。
 4. 不确定参数？先调用查询工具，不要猜测。
 5. 不确定怎么做？先 web_search_blender 或 kb_search。
+6. 为避免 token 暴涨，读取节点图时必须先摘要后细读：先 shader_get_material_summary(detail_level="basic", include_node_index=true)，需要定位节点时先 shader_search_index，再 shader_inspect_nodes(limit=20~40, compact=true) 分页，最后仅对关键节点开启 include_values。
 === 工作流 ===
 1. 理解需求
 2. 调研：链接→web_analyze_reference，复杂材质→web_search_blender+kb_search
@@ -58,12 +61,16 @@ Principled BSDF 输入名：Base Color, Metallic, Roughness, IOR, Alpha, Transmi
 PREFLIGHT = "[系统提醒] 你是 Blender 操作者，必须使用提供的工具执行操作。禁止纯文字回复，禁止生成 Python 脚本。立即调用工具。\n\n"
 
 DOMAIN_HINTS = {
-    "shader": "\n[领域提示] 着色器操作。复杂材质: shader_clear_nodes→shader_batch_add_nodes→shader_batch_link_nodes。验证: shader_get_material_summary",
+    "shader": "\n[领域提示] 着色器操作。先摘要后分页：shader_get_material_summary(detail_level='basic', include_node_index=true) → shader_search_index(query='...') → shader_inspect_nodes(limit=30, compact=true)。仅在定位关键节点后，才用 include_values=true 精读。复杂材质: shader_clear_nodes→shader_batch_add_nodes→shader_batch_link_nodes。验证: shader_get_material_summary",
     "toon": "\n[领域提示] 卡通渲染。核心: ShaderToRGB→ColorRamp(CONSTANT)→Emission。使用 shader_create_toon_material 或 shader_convert_to_toon",
     "animation": "\n[领域提示] 动画。Driver 表达式可用: frame, sin, cos, abs, min, max, pow, sqrt",
     "scene": "\n[领域提示] 场景操作。操作前先 get_scene_info 确认状态。",
     "render": "\n[领域提示] 渲染。EEVEE 透射需要 SSR + SSR Refraction。",
 }
+
+MAX_TOOL_ROUNDS = 8
+HISTORY_CHAR_BUDGET = 120000
+HISTORY_KEEP_TAIL = 16
 
 
 class BlenderAgent:
@@ -75,6 +82,11 @@ class BlenderAgent:
         self.llm = UnifiedLLM(config)
         self.conversation_history = []
         self.max_history = 200  # 取消对话历史限制，保留足够上下文
+        self._tool_rounds = 0
+        self._request_counter = 0
+        self._active_request_id = 0
+        self._cancel_event = threading.Event()
+        self._state_lock = threading.Lock()
 
         # UI 回调
         self.on_message: Optional[Callable] = None
@@ -108,13 +120,31 @@ class BlenderAgent:
 
     def send_message(self, user_message: str):
         """发送消息（在后台线程处理）"""
-        thread = threading.Thread(target=self._process, args=(user_message,))
+        with self._state_lock:
+            self._request_counter += 1
+            request_id = self._request_counter
+            self._active_request_id = request_id
+            self._cancel_event.clear()
+        thread = threading.Thread(target=self._process, args=(user_message, request_id))
         thread.daemon = True
         thread.start()
 
-    def _process(self, user_message: str):
+    def cancel_current_request(self):
+        """请求取消当前进行中的任务（网络调用返回后生效）"""
+        self._cancel_event.set()
+        _log("Cancel requested")
+
+    def _is_request_cancelled(self, request_id: int) -> bool:
+        with self._state_lock:
+            active = self._active_request_id
+        return self._cancel_event.is_set() or request_id != active
+
+    def _process(self, user_message: str, request_id: int):
         """处理用户消息 — 主流程"""
         try:
+            if self._is_request_cancelled(request_id):
+                return
+            self._tool_rounds = 0
             # 日志
             self._log_action("start", user_message)
 
@@ -133,6 +163,7 @@ class BlenderAgent:
             # 裁剪历史
             if len(self.conversation_history) > self.max_history * 2:
                 self.conversation_history = self.conversation_history[-self.max_history * 2:]
+            self._compact_history_if_needed()
 
             # 调用 LLM
             response = self.llm.chat(
@@ -140,9 +171,12 @@ class BlenderAgent:
                 system=SYSTEM_PROMPT,
                 tools=tools,
             )
+            if self._is_request_cancelled(request_id):
+                _log("Request cancelled after LLM response; dropping output")
+                return
 
             # 处理响应
-            self._handle_response(response, tools)
+            self._handle_response(response, tools, request_id)
 
         except Exception as e:
             tb = traceback.format_exc()
@@ -151,8 +185,10 @@ class BlenderAgent:
             self._log_action("error", error_msg)
             self._fire_callback(self.on_error, error_msg)
 
-    def _handle_response(self, response: LLMResponse, tools: list):
+    def _handle_response(self, response: LLMResponse, tools: list, request_id: int):
         """处理 LLM 响应"""
+        if self._is_request_cancelled(request_id):
+            return
         # 文本部分
         if response.text:
             self._fire_callback(self.on_message, "assistant", response.text)
@@ -163,7 +199,7 @@ class BlenderAgent:
             self.conversation_history.append(
                 self.llm.format_assistant_message(response)
             )
-            self._execute_tools(response.tool_calls, tools)
+            self._execute_tools(response.tool_calls, tools, request_id)
         else:
             # 无工具调用 — 记录并结束
             if response.text:
@@ -172,23 +208,32 @@ class BlenderAgent:
                 )
             self._log_action("end", response.text[:200] if response.text else "")
 
-    def _execute_tools(self, tool_calls: list, tools: list):
+    def _execute_tools(self, tool_calls: list, tools: list, request_id: int):
         """执行工具调用"""
         tool_results = []
 
         for tc in tool_calls:
+            if self._is_request_cancelled(request_id):
+                _log("Request cancelled before tool execution loop finished")
+                return
             if tc.name == "execute_python":
                 tool_results.append(self.llm.format_tool_result(
                     tc.id, "错误：execute_python 已被禁用。请使用 MCP 工具。", is_error=True,
                 ))
                 continue
 
+            raw_args = tc.arguments or {}
+            normalized_args = normalize_tool_args(tc.name, raw_args)
+            normalized_args = self._maybe_expand_shader_inspect_args(tc.name, raw_args, normalized_args)
             _log(f"Executing: {tc.name}")
-            self._fire_callback(self.on_tool_call, tc.name, tc.arguments)
+            self._fire_callback(self.on_tool_call, tc.name, normalized_args)
 
             # 在主线程执行
-            result = self._execute_in_main_thread(execute_tool, tc.name, tc.arguments)
-            self._log_action("tool", tc.name, tc.arguments, result)
+            result = self._execute_in_main_thread(execute_tool, tc.name, normalized_args)
+            if self._is_request_cancelled(request_id):
+                _log("Request cancelled after tool execution; dropping result")
+                return
+            self._log_action("tool", tc.name, normalized_args, result)
 
             # 特殊处理
             if result.get("result") == "NEEDS_CONFIRMATION":
@@ -198,7 +243,7 @@ class BlenderAgent:
                 continue
 
             if result.get("result") == "NEEDS_VISION_ANALYSIS":
-                self._handle_vision(tc.id, result)
+                self._handle_vision(tc.id, result, request_id)
                 return
 
             # 格式化结果
@@ -213,22 +258,91 @@ class BlenderAgent:
                 ))
 
         if tool_results:
-            self._continue_with_results(tool_results, tools)
+            self._continue_with_results(tool_results, tools, request_id)
 
-    def _continue_with_results(self, tool_results: list, tools: list):
+    def _maybe_expand_shader_inspect_args(self, tool_name: str, raw_args: dict, normalized_args: dict) -> dict:
+        """
+        当模型请求 inspect 且想看值但没有指定节点时：
+        先自动做一次 shader_search_index，再把候选 node_names 注入 inspect。
+        """
+        try:
+            if tool_name != "shader_inspect_nodes":
+                return normalized_args
+
+            plan = plan_shader_inspect(raw_args, normalized_args)
+            self._log_action("metric", {
+                "name": "shader_read_plan",
+                "tool": tool_name,
+                "reason": plan.get("reason"),
+                "cost": plan.get("cost", {}),
+                "material_name": normalized_args.get("material_name") or raw_args.get("material_name"),
+            })
+            if not plan.get("auto_search"):
+                return normalized_args
+
+            search_args = plan.get("search_args") or {}
+
+            self._fire_callback(self.on_tool_call, "shader_search_index", search_args)
+            search_result = self._execute_in_main_thread(execute_tool, "shader_search_index", search_args)
+            self._log_action("tool", "shader_search_index", search_args, search_result)
+            result_payload = search_result.get("result") or {}
+            self._log_action("metric", {
+                "name": "shader_search_index_result",
+                "success": bool(search_result.get("success")),
+                "material_name": search_args.get("material_name"),
+                "query": search_args.get("query"),
+                "candidate_count": int(result_payload.get("candidate_count", 0)) if isinstance(result_payload, dict) else 0,
+            })
+
+            if not search_result.get("success"):
+                return normalized_args
+            payload = result_payload
+            candidates = payload.get("candidates") or []
+            node_names = [c.get("node_name") for c in candidates if isinstance(c, dict) and c.get("node_name")]
+            if not node_names:
+                return normalized_args
+
+            expanded = dict(normalized_args)
+            expanded["node_names"] = node_names[:8]
+            expanded["include_values"] = True
+            expanded["compact"] = False
+            expanded["limit"] = min(max(len(expanded["node_names"]), int(expanded.get("limit", 30))), 80)
+            return expanded
+        except Exception as e:
+            _log(f"auto-search expand failed: {e}")
+            return normalized_args
+
+    def _continue_with_results(self, tool_results: list, tools: list, request_id: int):
         """将工具结果发回 LLM 继续对话"""
         try:
+            if self._is_request_cancelled(request_id):
+                return
+            self._tool_rounds += 1
+            if self._tool_rounds > MAX_TOOL_ROUNDS:
+                stop_msg = (
+                    f"工具调用已达到上限（{MAX_TOOL_ROUNDS} 轮）。"
+                    "为避免无限循环，我先停止继续调用工具并总结当前结果。"
+                )
+                self._fire_callback(self.on_message, "assistant", stop_msg)
+                self._log_action("message", stop_msg)
+                self._log_action("end", stop_msg)
+                return
+
             result_messages = self.llm.format_tool_results(tool_results)
             self.conversation_history.extend(
                 result_messages if isinstance(result_messages, list) else [result_messages]
             )
+            self._compact_history_if_needed()
 
             response = self.llm.chat(
                 messages=self.conversation_history,
                 system=SYSTEM_PROMPT,
                 tools=tools,
             )
-            self._handle_response(response, tools)
+            if self._is_request_cancelled(request_id):
+                _log("Request cancelled after continue-call response; dropping output")
+                return
+            self._handle_response(response, tools, request_id)
 
         except Exception as e:
             error_msg = str(e)
@@ -236,9 +350,11 @@ class BlenderAgent:
             self._log_action("error", error_msg)
             self._fire_callback(self.on_error, error_msg)
 
-    def _handle_vision(self, tool_id: str, result: dict):
+    def _handle_vision(self, tool_id: str, result: dict, request_id: int):
         """处理视觉分析请求"""
         try:
+            if self._is_request_cancelled(request_id):
+                return
             vision_msg = {
                 "role": "user",
                 "content": [
@@ -258,19 +374,22 @@ class BlenderAgent:
             }
             temp_history = self.conversation_history.copy()
             temp_history.append(vision_msg)
+            temp_history = self._compact_history(temp_history)
 
             response = self.llm.chat(messages=temp_history, system=SYSTEM_PROMPT)
+            if self._is_request_cancelled(request_id):
+                return
 
             analysis = response.text
             tool_result = self.llm.format_tool_result(tool_id, analysis)
-            self._continue_with_results([tool_result], self._tools)
+            self._continue_with_results([tool_result], self._tools, request_id)
 
         except Exception as e:
             _log(f"Vision error: {e}")
             tool_result = self.llm.format_tool_result(
                 tool_id, f"场景分析失败: {e}", is_error=True,
             )
-            self._continue_with_results([tool_result], self._tools)
+            self._continue_with_results([tool_result], self._tools, request_id)
 
     def _execute_in_main_thread(self, func, *args) -> dict:
         """在 Blender 主线程执行函数"""
@@ -319,6 +438,56 @@ class BlenderAgent:
             except Exception:
                 pass
 
+    def _history_chars(self, messages: list = None) -> int:
+        total = 0
+        items = messages if messages is not None else self.conversation_history
+        for msg in items:
+            content = msg.get("content")
+            if isinstance(content, str):
+                total += len(content)
+            elif isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict):
+                        total += len(json.dumps(block, ensure_ascii=False))
+                    else:
+                        total += len(str(block))
+            elif content is not None:
+                total += len(str(content))
+        return total
+
+    def _compact_history_if_needed(self):
+        if self._history_chars() <= HISTORY_CHAR_BUDGET:
+            return
+        self.conversation_history = self._compact_history(self.conversation_history)
+
+    def _compact_history(self, history: list) -> list:
+        if len(history) <= HISTORY_KEEP_TAIL + 1:
+            return history
+
+        head = history[:-HISTORY_KEEP_TAIL]
+        tail = history[-HISTORY_KEEP_TAIL:]
+
+        summary_lines = ["[历史压缩摘要] 以下为较早轮次的关键信息："]
+        for msg in head[-40:]:
+            role = msg.get("role", "unknown")
+            content = msg.get("content")
+            if isinstance(content, str):
+                snippet = content.replace("\n", " ")[:180]
+                summary_lines.append(f"- {role}: {snippet}")
+            elif isinstance(content, list):
+                tool_events = 0
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") in ("tool_use", "tool_result"):
+                        tool_events += 1
+                summary_lines.append(f"- {role}: 结构化内容 {len(content)} 块（工具相关 {tool_events}）")
+            else:
+                summary_lines.append(f"- {role}: {str(content)[:120]}")
+
+        compacted = [{"role": "system", "content": "\n".join(summary_lines)}]
+        compacted.extend(tail)
+        _log(f"History compacted: {len(history)} -> {len(compacted)}, chars={self._history_chars(compacted)}")
+        return compacted
+
     def _log_action(self, action_type: str, *args):
         """记录操作日志"""
         try:
@@ -335,6 +504,10 @@ class BlenderAgent:
                 action_log.end_session(f"错误: {args[0][:200]}")
             elif action_type == "end":
                 action_log.end_session(args[0] if args else "")
+            elif action_type == "metric":
+                payload = args[0] if args else {}
+                metric_name = payload.get("name", "unknown_metric")
+                action_log.log_metric(metric_name, payload)
         except Exception:
             pass
 

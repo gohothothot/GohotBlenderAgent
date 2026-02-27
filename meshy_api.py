@@ -308,13 +308,32 @@ def download_texture(url: str, save_dir: str, name: str) -> str:
 
 _meshy_api = None
 
+def _get_addon_prefs():
+    init_bpy()
+    try:
+        addon = bpy.context.preferences.addons.get(__package__)
+        if addon:
+            return addon.preferences
+    except Exception:
+        pass
+
+    # 兼容不同安装目录名，回退扫描包含 Meshy 配置字段的插件偏好
+    try:
+        for addon in bpy.context.preferences.addons.values():
+            prefs = getattr(addon, "preferences", None)
+            if prefs and hasattr(prefs, "meshy_api_key") and hasattr(prefs, "meshy_ai_model"):
+                return prefs
+    except Exception:
+        pass
+    return None
+
 def get_meshy_api() -> Optional[MeshyAPI]:
     global _meshy_api
     init_bpy()
     
     try:
-        prefs = bpy.context.preferences.addons["blender_mcp"].preferences
-        if not prefs.meshy_api_key:
+        prefs = _get_addon_prefs()
+        if not prefs or not prefs.meshy_api_key:
             return None
         
         if _meshy_api is None or _meshy_api.api_key != prefs.meshy_api_key:

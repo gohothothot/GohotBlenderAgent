@@ -8,12 +8,15 @@ Executor Agent - 工具执行
 """
 
 import json
+import threading
+import time
 from ..llm.base import LLMProvider, LLMResponse
 from ..parsers.plan_parser import PlanStep
 from ..parsers.result_parser import summarize_tool_result
 from ..context.prompts import AgentPrompts
 from ..context.manager import ContextManager
 from ..tools.registry import get_registry
+from .shader_read_agent import ShaderReadAgent
 
 
 def _log(msg: str):
@@ -25,6 +28,36 @@ class ExecutorAgent:
     def __init__(self, llm: LLMProvider, execute_in_main_thread=None):
         self._llm = llm
         self._execute_in_main_thread = execute_in_main_thread
+        self._shader_reader = ShaderReadAgent(self._run_tool)
+        self._shader_prewarm = None
+        self._shader_prewarm_lock = threading.Lock()
+
+    def prewarm_shader_context(self, user_message: str):
+        """后台预热 shader 读取上下文，供后续执行阶段复用"""
+        started = time.time()
+        try:
+            shader_ctx = self._shader_reader.build_context(user_message)
+            with self._shader_prewarm_lock:
+                self._shader_prewarm = shader_ctx
+            elapsed_ms = int((time.time() - started) * 1000)
+            self._log_metric("shader_prewarm", {
+                "success": bool(shader_ctx.get("success")),
+                "elapsed_ms": elapsed_ms,
+                "metrics": shader_ctx.get("metrics", {}),
+            })
+            _log(f"shader prewarm done: success={shader_ctx.get('success')} elapsed={elapsed_ms}ms")
+        except Exception as e:
+            self._log_metric("shader_prewarm", {
+                "success": False,
+                "error": str(e),
+            })
+            _log(f"shader prewarm failed: {e}")
+
+    def _consume_shader_prewarm_context(self):
+        with self._shader_prewarm_lock:
+            ctx = self._shader_prewarm
+            self._shader_prewarm = None
+            return ctx
 
     def execute_step(
         self,
@@ -50,6 +83,20 @@ class ExecutorAgent:
         # 强化工具使用指令（与旧 BlenderAgent 一致）
         preflight = "[系统提醒] 你是 Blender 操作者，必须使用提供的工具执行操作。禁止纯文字回复，立即调用工具。\n\n"
         messages = [{"role": "user", "content": preflight + user_message}]
+        if domain == "shader":
+            shader_ctx = self._consume_shader_prewarm_context()
+            ctx_source = "prewarm_cache"
+            if not shader_ctx:
+                shader_ctx = self._shader_reader.build_context(user_message)
+                ctx_source = "inline_build"
+            if shader_ctx.get("success") and shader_ctx.get("context_text"):
+                messages.append({"role": "user", "content": shader_ctx["context_text"]})
+            self._log_metric("shader_context_attach", {
+                "source": ctx_source,
+                "success": bool(shader_ctx.get("success")),
+                "metrics": shader_ctx.get("metrics", {}),
+            })
+            _log(f"shader pre-context metrics({ctx_source}): {shader_ctx.get('metrics', {})}")
 
         # 如果意图筛选后工具为空，回退到全部工具
         if not tools and registry.count > 0:
@@ -94,6 +141,21 @@ class ExecutorAgent:
         messages = ctx.build_executor_context(
             step.description, step.params, prev_summary, user_message,
         )
+        if domain == "shader":
+            shader_ctx = self._consume_shader_prewarm_context()
+            ctx_source = "prewarm_cache"
+            shader_hint_input = f"{user_message}\n{step.description or ''}"
+            if not shader_ctx:
+                shader_ctx = self._shader_reader.build_context(shader_hint_input)
+                ctx_source = "inline_build"
+            if shader_ctx.get("success") and shader_ctx.get("context_text"):
+                messages.append({"role": "user", "content": shader_ctx["context_text"]})
+            self._log_metric("shader_context_attach", {
+                "source": ctx_source,
+                "success": bool(shader_ctx.get("success")),
+                "metrics": shader_ctx.get("metrics", {}),
+            })
+            _log(f"shader step pre-context metrics({ctx_source}): {shader_ctx.get('metrics', {})}")
 
         result = self._llm_tool_loop(messages, system, tool_schemas, max_rounds=3)
         step.status = "success" if result.get("success") else "failed"
@@ -176,3 +238,11 @@ class ExecutorAgent:
             return tool_definitions.execute_tool(name, arguments)
         except Exception as e:
             return {"success": False, "result": None, "error": f"工具执行失败: {e}"}
+
+    @staticmethod
+    def _log_metric(metric_name: str, payload: dict):
+        try:
+            from .. import action_log
+            action_log.log_metric(metric_name, payload)
+        except Exception:
+            pass

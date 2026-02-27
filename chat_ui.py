@@ -4,6 +4,8 @@ Blender Agent Chat UI - 侧边栏 + 弹窗双模式对话界面
 
 import bpy
 import json
+import os
+from datetime import datetime
 from bpy.props import StringProperty, CollectionProperty, IntProperty, BoolProperty, EnumProperty
 from bpy.types import PropertyGroup, Operator, Panel, AddonPreferences, UIList
 
@@ -272,6 +274,28 @@ def _on_error(error: str):
 _pending_callback = None
 
 
+def _build_performance_report_lines(max_sessions: int = 5) -> list:
+    lines = []
+    try:
+        from . import action_log
+        logs = action_log.get_recent_logs(max_sessions)
+        if not logs:
+            return ["暂无性能日志。先执行几次任务后再查看。"]
+
+        lines.append(f"最近 {len(logs)} 次会话性能摘要")
+        lines.append("-" * 60)
+        for log in logs:
+            sid = log.get("session_id", "?")
+            req = (log.get("user_request", "") or "").replace("\n", " ")[:80]
+            brief = log.get("performance_brief", "无性能摘要")
+            lines.append(f"[{sid}] {req}")
+            lines.append(f"  {brief}")
+            lines.append("")
+        return lines
+    except Exception as e:
+        return [f"读取性能日志失败: {e}"]
+
+
 # ========== UIList ==========
 
 
@@ -339,6 +363,26 @@ class AGENT_OT_SendMessage(Operator):
 
         agent.send_message(user_msg)
 
+        return {"FINISHED"}
+
+
+class AGENT_OT_StopProcessing(Operator):
+    bl_idname = "agent.stop_processing"
+    bl_label = "中止"
+    bl_description = "中止当前 AI 请求（网络返回后立即丢弃结果）"
+
+    def execute(self, context):
+        state = _get_state()
+        agent = get_agent()
+        if agent and hasattr(agent, "cancel_current_request"):
+            try:
+                agent.cancel_current_request()
+            except Exception:
+                pass
+
+        state.is_processing = False
+        _add_message("system", "⏹️ 已请求中止当前任务。")
+        self.report({"INFO"}, "已发送中止请求")
         return {"FINISHED"}
 
 
@@ -580,7 +624,9 @@ class AGENT_OT_OpenChat(Operator):
         layout.separator()
 
         if state.is_processing:
-            layout.label(text="⏳ AI 正在思考...", icon="SORTTIME")
+            row = layout.row(align=True)
+            row.label(text="⏳ AI 正在思考...", icon="SORTTIME")
+            row.operator("agent.stop_processing", text="中止", icon="CANCEL")
         else:
             row = layout.row(align=True)
             row.prop(state, "input_text", text="")
@@ -589,6 +635,8 @@ class AGENT_OT_OpenChat(Operator):
         layout.separator()
         row = layout.row(align=True)
         row.operator("agent.open_settings", text="设置", icon="PREFERENCES")
+        row.operator("agent.view_performance_report", text="性能报告", icon="GRAPH")
+        row.operator("agent.export_performance_report", text="", icon="EXPORT")
 
     def invoke(self, context, event):
         prefs = get_preferences()
@@ -643,7 +691,9 @@ class AGENT_PT_MainPanel(Panel):
         )
 
         if state.is_processing:
-            layout.label(text="⏳ AI 正在思考...", icon='SORTTIME')
+            row = layout.row(align=True)
+            row.label(text="⏳ AI 正在思考...", icon='SORTTIME')
+            row.operator("agent.stop_processing", text="中止", icon='CANCEL')
         else:
             row = layout.row(align=True)
             row.prop(state, "input_text", text="")
@@ -667,6 +717,102 @@ class AGENT_PT_MainPanel(Panel):
         row = layout.row(align=True)
         row.operator("agent.open_settings", text="设置", icon='PREFERENCES')
         row.operator("agent.open_chat", text="弹窗模式", icon='WINDOW')
+
+        perf_row = layout.row(align=True)
+        perf_row.operator("agent.view_performance_report", text="性能报告", icon='GRAPH')
+        perf_row.operator("agent.export_performance_report", text="导出", icon='EXPORT')
+
+
+class AGENT_OT_ViewPerformanceReport(Operator):
+    bl_idname = "agent.view_performance_report"
+    bl_label = "查看性能报告"
+    bl_description = "查看最近会话的性能摘要（命中率、预热耗时、检索成功率）"
+
+    def invoke(self, context, event):
+        self._lines = _build_performance_report_lines(max_sessions=5)
+        return context.window_manager.invoke_props_dialog(self, width=760)
+
+    def execute(self, context):
+        return {"FINISHED"}
+
+    def draw(self, context):
+        layout = self.layout
+        box = layout.box()
+        col = box.column(align=True)
+        for line in getattr(self, "_lines", ["暂无数据"]):
+            col.label(text=line if line else " ")
+
+
+class AGENT_OT_ExportPerformanceReport(Operator):
+    bl_idname = "agent.export_performance_report"
+    bl_label = "导出性能报告"
+    bl_description = "导出最近会话性能报告到 logs 目录"
+
+    export_format: EnumProperty(
+        name="格式",
+        items=[
+            ("json", "JSON", "导出完整 JSON 报告"),
+            ("csv", "CSV", "导出简化 CSV 报告"),
+        ],
+        default="json",
+    )
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self, width=380)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "export_format")
+        layout.label(text="文件将导出到插件 logs 目录", icon='INFO')
+
+    def execute(self, context):
+        try:
+            from . import action_log
+
+            logs = action_log.get_recent_logs(20)
+            if not logs:
+                self.report({'WARNING'}, "暂无性能日志可导出")
+                return {'CANCELLED'}
+
+            log_dir = os.path.join(os.path.dirname(__file__), "logs")
+            os.makedirs(log_dir, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+            if self.export_format == "json":
+                out_path = os.path.join(log_dir, f"performance_report_{ts}.json")
+                payload = []
+                for log in logs:
+                    payload.append({
+                        "session_id": log.get("session_id"),
+                        "user_request": log.get("user_request"),
+                        "performance_brief": log.get("performance_brief"),
+                        "performance_summary": log.get("performance_summary", {}),
+                    })
+                with open(out_path, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, ensure_ascii=False, indent=2)
+            else:
+                out_path = os.path.join(log_dir, f"performance_report_{ts}.csv")
+                header = "session_id,user_request,metric_events,prewarm_hit_rate,search_success_rate,avg_estimated_output_tokens\n"
+                rows = [header]
+                for log in logs:
+                    summary = log.get("performance_summary", {}) or {}
+                    attach = summary.get("shader_context_attach", {}) or {}
+                    search = summary.get("shader_search_index_result", {}) or {}
+                    plan = summary.get("shader_read_plan", {}) or {}
+                    request = (log.get("user_request", "") or "").replace('"', "'").replace("\n", " ")[:120]
+                    rows.append(
+                        f"\"{log.get('session_id', '')}\",\"{request}\",{summary.get('metric_events', 0)},"
+                        f"{attach.get('prewarm_hit_rate', 0)},{search.get('success_rate', 0)},"
+                        f"{plan.get('avg_estimated_output_tokens', 0)}\n"
+                    )
+                with open(out_path, "w", encoding="utf-8") as f:
+                    f.writelines(rows)
+
+            self.report({'INFO'}, f"已导出: {out_path}")
+            return {'FINISHED'}
+        except Exception as e:
+            self.report({'ERROR'}, f"导出失败: {e}")
+            return {'CANCELLED'}
 
 
 class AGENT_PT_TodoPanel(Panel):
@@ -716,6 +862,7 @@ classes = [
     AgentState,
     AGENT_UL_MessageList,
     AGENT_OT_SendMessage,
+    AGENT_OT_StopProcessing,
     AGENT_OT_ConfirmCode,
     AGENT_OT_ClearHistory,
     AGENT_OT_OpenSettings,
@@ -726,6 +873,8 @@ classes = [
     AGENT_OT_ToggleTodo,
     AGENT_OT_SendTodoToAgent,
     AGENT_OT_OpenChat,
+    AGENT_OT_ViewPerformanceReport,
+    AGENT_OT_ExportPerformanceReport,
     AGENT_PT_MainPanel,
     AGENT_PT_TodoPanel,
 ]

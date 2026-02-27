@@ -111,9 +111,23 @@ class AgentOrchestrator:
         self._end_session(result.get("result", ""))
 
     def _process_complex(self, user_message: str, route):
+        prewarm_thread = None
+        if route.domain == "shader":
+            _log("Starting shader prewarm in parallel with planning")
+            prewarm_thread = threading.Thread(
+                target=self._executor.prewarm_shader_context,
+                args=(user_message,),
+                daemon=True,
+            )
+            prewarm_thread.start()
+
         _log(f"Planning: intent={route.intent}")
         plan = self._planner.plan(user_message, route.intent)
         _log(f"Plan result: {plan.total_steps} steps, summary={plan.summary[:80] if plan.summary else 'N/A'}")
+
+        if prewarm_thread:
+            prewarm_thread.join(timeout=2.0)
+            _log("Shader prewarm join complete (timeout=2s)")
 
         if not plan.steps:
             _log("Empty plan, falling back to simple")

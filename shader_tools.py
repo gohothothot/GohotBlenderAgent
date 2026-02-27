@@ -184,61 +184,118 @@ def shader_assign_material(material_name: str, object_name: str, slot_index: int
 
 # ========== Node Graph Inspection ==========
 
-def shader_inspect_nodes(material_name: str) -> dict:
-    """返回完整的节点图结构"""
+def _collect_node_detail(node, include_values: bool = False) -> dict:
+    """按需收集节点信息，避免无意义的大 payload"""
+    if include_values:
+        inputs = []
+        outputs = []
+        for inp in node.inputs:
+            inp_info = {
+                "name": inp.name,
+                "type": str(inp.type),
+                "default_value": _serialize_socket_value(inp.default_value),
+                "linked": len(inp.links) > 0,
+            }
+            inputs.append(inp_info)
+        for out in node.outputs:
+            out_info = {
+                "name": out.name,
+                "type": str(out.type),
+                "linked": len(out.links) > 0,
+            }
+            outputs.append(out_info)
+        return {
+            "name": node.name,
+            "type": node.type,
+            "label": node.label,
+            "location": list(node.location),
+            "inputs": inputs,
+            "outputs": outputs,
+        }
+
+    linked_inputs = sum(1 for inp in node.inputs if len(inp.links) > 0)
+    linked_outputs = sum(1 for out in node.outputs if len(out.links) > 0)
+    return {
+        "name": node.name,
+        "type": node.type,
+        "label": node.label,
+        "location": [round(node.location.x, 2), round(node.location.y, 2)],
+        "input_count": len(node.inputs),
+        "output_count": len(node.outputs),
+        "linked_inputs": linked_inputs,
+        "linked_outputs": linked_outputs,
+    }
+
+
+def shader_inspect_nodes(
+    material_name: str,
+    node_names: Optional[List[str]] = None,
+    query: str = "",
+    include_values: bool = False,
+    include_links: bool = True,
+    limit: int = 30,
+    offset: int = 0,
+    compact: bool = True,
+) -> dict:
+    """分页查看节点图结构，默认返回轻量摘要以减少 token 使用"""
     try:
         mat = _get_material(material_name)
-        
+
         if not mat.use_nodes:
             return _result(False, None, "Material does not use nodes")
-        
-        nodes_info = []
+
+        all_nodes = list(mat.node_tree.nodes)
+        if node_names:
+            wanted = set(node_names)
+            all_nodes = [n for n in all_nodes if n.name in wanted]
+
+        total_nodes = len(all_nodes)
+        safe_limit = max(1, min(int(limit or 30), 200))
+        safe_offset = max(0, int(offset or 0))
+        page_nodes = all_nodes[safe_offset:safe_offset + safe_limit]
+        page_names = {n.name for n in page_nodes}
+
+        nodes_info = [_collect_node_detail(n, include_values=(include_values and not compact)) for n in page_nodes]
+
         links_info = []
-        
-        # 收集节点信息
-        for node in mat.node_tree.nodes:
-            inputs = []
-            outputs = []
-            
-            for inp in node.inputs:
-                inp_info = {
-                    "name": inp.name,
-                    "type": str(inp.type),
-                    "default_value": _serialize_socket_value(inp.default_value),
-                    "linked": len(inp.links) > 0,
-                }
-                inputs.append(inp_info)
-            
-            for out in node.outputs:
-                out_info = {
-                    "name": out.name,
-                    "type": str(out.type),
-                    "linked": len(out.links) > 0,
-                }
-                outputs.append(out_info)
-            
-            nodes_info.append({
-                "name": node.name,
-                "type": node.type,
-                "label": node.label,
-                "location": list(node.location),
-                "inputs": inputs,
-                "outputs": outputs,
-            })
-        
-        # 收集连接信息
-        for link in mat.node_tree.links:
-            links_info.append({
-                "from_node": link.from_node.name,
-                "from_socket": link.from_socket.name,
-                "to_node": link.to_node.name,
-                "to_socket": link.to_socket.name,
-            })
-        
-        return _result(True, {
+        if include_links:
+            for link in mat.node_tree.links:
+                # 只返回当前页相关连接，防止连接信息膨胀
+                if link.from_node.name in page_names or link.to_node.name in page_names:
+                    links_info.append({
+                        "from_node": link.from_node.name,
+                        "from_socket": link.from_socket.name,
+                        "to_node": link.to_node.name,
+                        "to_socket": link.to_socket.name,
+                    })
+
+        node_types = {}
+        for node in all_nodes:
+            node_types[node.bl_idname] = node_types.get(node.bl_idname, 0) + 1
+        top_types = sorted(node_types.items(), key=lambda x: x[1], reverse=True)[:12]
+
+        payload = {
+            "material_name": material_name,
+            "graph_summary": {
+                "total_nodes": total_nodes,
+                "total_links": len(mat.node_tree.links),
+                "node_type_top": [{"type": t, "count": c} for t, c in top_types],
+            },
+            "page": {
+                "offset": safe_offset,
+                "limit": safe_limit,
+                "returned": len(nodes_info),
+                "has_more": safe_offset + safe_limit < total_nodes,
+            },
             "nodes": nodes_info,
-            "links": links_info,
-        })
+            "links": links_info if include_links else [],
+        }
+        try:
+            from .context.indexer import get_graph_indexer
+            get_graph_indexer().upsert_from_inspect(material_name, payload)
+        except Exception:
+            pass
+        return _result(True, payload)
     except Exception as e:
         return _result(False, None, str(e))
 
@@ -1528,8 +1585,13 @@ def shader_clear_nodes(material_name: str, keep_output: bool = True) -> dict:
         return _result(False, None, str(e))
 
 
-def shader_get_material_summary(material_name: str) -> dict:
-    """获取材质的完整摘要：节点数量、连接数量、使用的节点类型、关键参数等"""
+def shader_get_material_summary(
+    material_name: str,
+    detail_level: str = "basic",
+    include_node_index: bool = False,
+    node_index_limit: int = 80,
+) -> dict:
+    """获取材质摘要，默认轻量返回，必要时再拉 full 详情"""
     try:
         mat = _get_material(material_name)
         if not mat.use_nodes:
@@ -1540,6 +1602,7 @@ def shader_get_material_summary(material_name: str) -> dict:
         
         node_types = {}
         key_params = {}
+        level = (detail_level or "basic").lower()
         
         for node in nodes:
             bl_type = node.bl_idname
@@ -1562,6 +1625,14 @@ def shader_get_material_summary(material_name: str) -> dict:
                                 params[inp.name] = round(val, 3) if isinstance(val, float) else val
                         except:
                             pass
+                # basic 模式下只保留高价值参数，减少无效噪音
+                if level == "basic":
+                    high_value_keys = {
+                        "Base Color", "Metallic", "Roughness", "IOR",
+                        "Transmission", "Transmission Weight", "Alpha",
+                        "Emission Color", "Emission Strength", "Normal",
+                    }
+                    params = {k: v for k, v in params.items() if k in high_value_keys}
                 key_params["Principled BSDF"] = params
         
         # Material settings
@@ -1571,13 +1642,74 @@ def shader_get_material_summary(material_name: str) -> dict:
             "use_backface_culling": getattr(mat, 'use_backface_culling', False),
         }
         
-        return _result(True, {
+        summary = {
             "name": material_name,
             "node_count": len(nodes),
             "link_count": len(links),
             "node_types_used": node_types,
             "key_parameters": key_params,
             "material_settings": mat_settings,
+        }
+
+        if include_node_index:
+            limited = list(nodes)[:max(1, min(int(node_index_limit or 80), 300))]
+            summary["node_index"] = [
+                {"name": n.name, "type": n.bl_idname, "label": n.label}
+                for n in limited
+            ]
+            summary["node_index_truncated"] = len(nodes) > len(limited)
+
+        if level == "full":
+            summary["connections_preview"] = [
+                f"{l.from_node.name}.{l.from_socket.name} -> {l.to_node.name}.{l.to_socket.name}"
+                for l in list(links)[:120]
+            ]
+            summary["connections_truncated"] = len(links) > 120
+
+        try:
+            from .context.indexer import get_graph_indexer
+            get_graph_indexer().upsert_from_summary(material_name, summary)
+        except Exception:
+            pass
+        return _result(True, summary)
+    except Exception as e:
+        return _result(False, None, str(e))
+
+
+def shader_search_index(material_name: str, query: str, top_k: int = 10) -> dict:
+    """在本地节点索引中做轻量语义检索，优先返回候选节点名"""
+    try:
+        from .context.indexer import get_graph_indexer
+
+        indexer = get_graph_indexer()
+        sem = indexer.semantic_search(material_name=material_name, query=query, top_k=top_k)
+        candidates = []
+        for item in sem.get("items", []):
+            meta = item.get("metadata", {})
+            if meta.get("kind") == "node" and meta.get("node_name"):
+                candidates.append({
+                    "node_name": meta.get("node_name"),
+                    "node_type": meta.get("node_type", ""),
+                    "node_label": meta.get("node_label", ""),
+                    "score": item.get("score", 0),
+                })
+
+        # 语义命中为空时，回退关键词过滤
+        if not candidates:
+            fallback = indexer.query_nodes(material_name=material_name, keyword=query, limit=top_k, offset=0)
+            candidates = [{
+                "node_name": n.get("name", ""),
+                "node_type": n.get("type", ""),
+                "node_label": n.get("label", ""),
+                "score": 0.0,
+            } for n in fallback.get("items", [])]
+
+        return _result(True, {
+            "material_name": material_name,
+            "query": query,
+            "candidate_count": len(candidates),
+            "candidates": candidates,
+            "hint": "优先使用返回的 node_name 列表调用 shader_inspect_nodes(node_names=[...], compact=false, include_values=true) 做精读。",
         })
     except Exception as e:
         return _result(False, None, str(e))
@@ -1638,6 +1770,8 @@ def execute_shader_tool(tool_name: str, arguments: dict) -> dict:
             return shader_clear_nodes(**arguments)
         elif tool_name == "shader_get_material_summary":
             return shader_get_material_summary(**arguments)
+        elif tool_name == "shader_search_index":
+            return shader_search_index(**arguments)
         else:
             return _result(False, None, f"Unknown tool: {tool_name}")
     except Exception as e:

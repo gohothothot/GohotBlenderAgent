@@ -6,5 +6,6 @@ Agent 层
 """
 
 from .orchestrator import AgentOrchestrator
+from .shader_read_agent import ShaderReadAgent
 
-__all__ = ["AgentOrchestrator"]
+__all__ = ["AgentOrchestrator", "ShaderReadAgent"]

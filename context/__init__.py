@@ -6,5 +6,14 @@
 
 from .manager import ContextManager
 from .prompts import AgentPrompts
+from .indexer import GraphIndexer, get_graph_indexer
+from .vector_store import SimpleVectorStore, get_vector_store
 
-__all__ = ["ContextManager", "AgentPrompts"]
+__all__ = [
+    "ContextManager",
+    "AgentPrompts",
+    "GraphIndexer",
+    "get_graph_indexer",
+    "SimpleVectorStore",
+    "get_vector_store",
+]

@@ -302,11 +302,18 @@ TOOLS = [
     },
     {
         "name": "shader_inspect_nodes",
-        "description": "查看材质的完整节点图结构，包括所有节点、连接、输入输出值",
+        "description": "查看材质节点图。默认返回轻量分页摘要，可按节点名过滤，按需开启详细值，避免一次性返回全量节点导致 token 过大。",
         "input_schema": {
             "type": "object",
             "properties": {
-                "material_name": {"type": "string", "description": "材质名称"}
+                "material_name": {"type": "string", "description": "材质名称"},
+                "node_names": {"type": "array", "items": {"type": "string"}, "description": "仅查看指定节点名称列表（可选）"},
+                "query": {"type": "string", "description": "可选检索提示词，用于自动定位关键节点"},
+                "include_values": {"type": "boolean", "description": "是否返回 socket 默认值（默认 false）"},
+                "include_links": {"type": "boolean", "description": "是否返回连接信息（默认 true）"},
+                "limit": {"type": "integer", "description": "分页大小，默认 30，最大 200"},
+                "offset": {"type": "integer", "description": "分页偏移，默认 0"},
+                "compact": {"type": "boolean", "description": "紧凑模式（默认 true，推荐用于大图）"}
             },
             "required": ["material_name"]
         }
@@ -581,13 +588,29 @@ TOOLS = [
     },
     {
         "name": "shader_get_material_summary",
-        "description": "获取材质完整摘要：节点数量、连接数量、使用的节点类型、Principled BSDF 关键参数、材质设置。用于检查和对比材质。",
+        "description": "获取材质摘要。默认 basic 轻量信息；可设 full 查看更多连接预览。可选返回节点索引，便于后续按需读取具体节点。",
         "input_schema": {
             "type": "object",
             "properties": {
-                "material_name": {"type": "string", "description": "材质名称"}
+                "material_name": {"type": "string", "description": "材质名称"},
+                "detail_level": {"type": "string", "enum": ["basic", "full"], "description": "摘要级别，默认 basic"},
+                "include_node_index": {"type": "boolean", "description": "是否返回节点索引（名称/类型/标签）"},
+                "node_index_limit": {"type": "integer", "description": "节点索引最大数量，默认 80"}
             },
             "required": ["material_name"]
+        }
+    },
+    {
+        "name": "shader_search_index",
+        "description": "在本地节点索引中检索候选节点名。用于在大节点图中先定位，再按 node_names 精读，避免一次性全量读取。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "material_name": {"type": "string", "description": "材质名称"},
+                "query": {"type": "string", "description": "检索关键词，如 roughness, emission, 透明, 纹理坐标"},
+                "top_k": {"type": "integer", "description": "返回候选数量，默认 10"}
+            },
+            "required": ["material_name", "query"]
         }
     },
     {
@@ -1038,6 +1061,76 @@ TOOLS = [
 _meshy_tasks = {}
 
 
+def _get_addon_prefs():
+    try:
+        addon = bpy.context.preferences.addons.get(__package__)
+        if addon:
+            return addon.preferences
+    except Exception:
+        pass
+
+    # 兼容不同安装目录名，回退扫描包含 Meshy 配置字段的插件偏好
+    try:
+        for addon in bpy.context.preferences.addons.values():
+            prefs = getattr(addon, "preferences", None)
+            if prefs and hasattr(prefs, "meshy_api_key") and hasattr(prefs, "meshy_ai_model"):
+                return prefs
+    except Exception:
+        pass
+    return None
+
+
+def _ensure_meshy_callbacks(api):
+    api.on_task_complete = _on_meshy_task_complete
+
+
+def _on_meshy_task_complete(task):
+    from . import meshy_api
+
+    task_meta = _meshy_tasks.get(task.task_id)
+    if not task_meta:
+        return
+
+    task_type = task_meta.get("type")
+    should_refine = task_meta.get("refine", True)
+
+    # 预览完成后触发 refine（可并发，不覆盖其他任务回调）
+    if task_type == "preview" and task.status == "SUCCEEDED" and should_refine:
+        try:
+            api = meshy_api.get_meshy_api()
+            if api is None:
+                return
+            refine_task_id = api.text_to_3d_refine(task.task_id, enable_pbr=True)
+            _meshy_tasks[refine_task_id] = {
+                "type": "refine",
+                "prompt": task_meta.get("prompt", ""),
+                "source_task_id": task.task_id,
+            }
+        except Exception as e:
+            print(f"[Meshy] Refine failed: {e}")
+        finally:
+            _meshy_tasks.pop(task.task_id, None)
+        return
+
+    if task.status != "SUCCEEDED":
+        _meshy_tasks.pop(task.task_id, None)
+        return
+
+    glb_url = task.model_urls.get("glb")
+    texture_urls = task.texture_urls
+    if glb_url:
+        if task_type == "refine":
+            source = task_meta.get("source_task_id", task.task_id)
+            model_name = f"Meshy_Refined_{source[:8]}"
+        elif task_type == "image-to-3d":
+            model_name = f"Meshy_Image3D_{task.task_id[:8]}"
+        else:
+            model_name = f"Meshy_{task.task_id[:8]}"
+        meshy_api.download_and_import_model(glb_url, model_name, texture_urls)
+
+    _meshy_tasks.pop(task.task_id, None)
+
+
 def _meshy_text_to_3d(prompt: str, refine: bool = True) -> dict:
     from . import meshy_api
     
@@ -1045,47 +1138,13 @@ def _meshy_text_to_3d(prompt: str, refine: bool = True) -> dict:
     if api is None:
         return {"success": False, "result": None, "error": "请先在插件设置中配置 Meshy API Key"}
 
-    try:
-        prefs = bpy.context.preferences.addons["blender_mcp"].preferences
-        ai_model = prefs.meshy_ai_model
-    except:
-        ai_model = "meshy-6"
-
-    def on_preview_complete(task):
-        if task.status == "SUCCEEDED" and refine:
-            try:
-                refine_task_id = api.text_to_3d_refine(task.task_id, enable_pbr=True)
-                _meshy_tasks[refine_task_id] = {"type": "refine", "prompt": prompt}
-                
-                def on_refine_complete(refine_task):
-                    if refine_task.status == "SUCCEEDED":
-                        glb_url = refine_task.model_urls.get("glb")
-                        texture_urls = refine_task.texture_urls
-                        if glb_url:
-                            meshy_api.download_and_import_model(
-                                glb_url, 
-                                f"Meshy_Refined_{task.task_id[:8]}", 
-                                texture_urls
-                            )
-                
-                api.on_task_complete = on_refine_complete
-            except Exception as e:
-                print(f"[Meshy] Refine failed: {e}")
-        elif task.status == "SUCCEEDED" and not refine:
-            glb_url = task.model_urls.get("glb")
-            texture_urls = task.texture_urls
-            if glb_url:
-                meshy_api.download_and_import_model(
-                    glb_url, 
-                    f"Meshy_{task.task_id[:8]}", 
-                    texture_urls
-                )
-
-    api.on_task_complete = on_preview_complete
+    prefs = _get_addon_prefs()
+    ai_model = prefs.meshy_ai_model if prefs and getattr(prefs, "meshy_ai_model", None) else "meshy-6"
+    _ensure_meshy_callbacks(api)
 
     try:
         task_id = api.text_to_3d_preview(prompt, ai_model=ai_model)
-        _meshy_tasks[task_id] = {"type": "preview", "prompt": prompt}
+        _meshy_tasks[task_id] = {"type": "preview", "prompt": prompt, "refine": bool(refine)}
         
         return {
             "success": True,
@@ -1104,24 +1163,9 @@ def _meshy_image_to_3d(image_url: str) -> dict:
     if api is None:
         return {"success": False, "result": None, "error": "请先在插件设置中配置 Meshy API Key"}
 
-    try:
-        prefs = bpy.context.preferences.addons["blender_mcp"].preferences
-        ai_model = prefs.meshy_ai_model
-    except:
-        ai_model = "meshy-6"
-
-    def on_complete(task):
-        if task.status == "SUCCEEDED":
-            glb_url = task.model_urls.get("glb")
-            texture_urls = task.texture_urls
-            if glb_url:
-                meshy_api.download_and_import_model(
-                    glb_url, 
-                    f"Meshy_Image3D_{task.task_id[:8]}", 
-                    texture_urls
-                )
-
-    api.on_task_complete = on_complete
+    prefs = _get_addon_prefs()
+    ai_model = prefs.meshy_ai_model if prefs and getattr(prefs, "meshy_ai_model", None) else "meshy-6"
+    _ensure_meshy_callbacks(api)
 
     try:
         task_id = api.image_to_3d(image_url, enable_pbr=True, ai_model=ai_model)
@@ -1308,6 +1352,9 @@ def execute_tool(tool_name: str, arguments: dict) -> dict:
                 s = f"[{log.get('session_id', '?')}] {log.get('user_request', '')[:60]} → {len(log.get('actions', []))} 步操作"
                 if log.get('final_result'):
                     s += f" → {log['final_result'][:60]}"
+                perf = log.get("performance_brief")
+                if perf:
+                    s += f"\n  性能: {perf}"
                 summaries.append(s)
             return {"success": True, "result": "\n".join(summaries), "error": None}
         elif tool_name.startswith("scene_"):

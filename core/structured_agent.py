@@ -32,6 +32,8 @@ from .tools import (
     truncate_result,
 )
 from .xml_parser import parse as parse_xml, build_tool_catalog, validate_tool_call
+from .tool_policies import normalize_tool_args
+from .shader_read_planner import plan_shader_inspect
 
 
 def _log(msg: str):
@@ -48,6 +50,7 @@ _BASE_PROMPT = """你是 Blender 场景的唯一操作者，拥有对 Blender �
 3. 禁止说"你可以"、"建议你"、"请手动"。你自己做。
 4. 不确定参数？先调用查询工具，不要猜测。
 5. 不确定怎么做？先 web_search_blender 或 kb_search。
+6. 为避免 token 暴涨，读取节点图必须先摘要后细读：先 shader_get_material_summary(detail_level="basic", include_node_index=true)，需要定位节点时先 shader_search_index，再 shader_inspect_nodes(limit=20~40, compact=true) 分页，最后仅对关键节点开启 include_values。
 
 === 工具调用格式 ===
 使用 XML 标签调用工具，可以在文字中间或末尾插入：
@@ -79,7 +82,7 @@ Principled BSDF 输入名：Base Color, Metallic, Roughness, IOR, Alpha, Transmi
 先做后说，中文回复，不要长篇大论。"""
 
 _DOMAIN_HINTS = {
-    "shader": "\n[领域提示] 着色器操作。复杂材质: shader_clear_nodes→shader_batch_add_nodes→shader_batch_link_nodes。验证: shader_get_material_summary",
+    "shader": "\n[领域提示] 着色器操作。先摘要后分页：shader_get_material_summary(detail_level='basic', include_node_index=true) → shader_search_index(query='...') → shader_inspect_nodes(limit=30, compact=true)。仅在定位关键节点后，才用 include_values=true 精读。复杂材质: shader_clear_nodes→shader_batch_add_nodes→shader_batch_link_nodes。验证: shader_get_material_summary",
     "toon": "\n[领域提示] 卡通渲染。核心: ShaderToRGB→ColorRamp(CONSTANT)→Emission。使用 shader_create_toon_material 或 shader_convert_to_toon",
     "animation": "\n[领域提示] 动画。Driver 表达式可用: frame, sin, cos, abs, min, max, pow, sqrt",
     "scene": "\n[领域提示] 场景操作。操作前先 get_scene_info 确认状态。",
@@ -107,6 +110,10 @@ class StructuredAgent:
         self.llm = UnifiedLLM(config)
         self.conversation_history = []
         self.max_history = 200  # 取消对话历史限制，保留足够上下文
+        self._request_counter = 0
+        self._active_request_id = 0
+        self._cancel_event = threading.Event()
+        self._state_lock = threading.Lock()
 
         # UI 回调（与 BlenderAgent 一致）
         self.on_message: Optional[Callable] = None
@@ -133,13 +140,30 @@ class StructuredAgent:
 
     def send_message(self, user_message: str):
         """发送消息（后台线程）"""
-        thread = threading.Thread(target=self._process, args=(user_message,))
+        with self._state_lock:
+            self._request_counter += 1
+            request_id = self._request_counter
+            self._active_request_id = request_id
+            self._cancel_event.clear()
+        thread = threading.Thread(target=self._process, args=(user_message, request_id))
         thread.daemon = True
         thread.start()
 
-    def _process(self, user_message: str):
+    def cancel_current_request(self):
+        """请求取消当前进行中的任务（网络调用返回后生效）"""
+        self._cancel_event.set()
+        _log("Cancel requested")
+
+    def _is_request_cancelled(self, request_id: int) -> bool:
+        with self._state_lock:
+            active = self._active_request_id
+        return self._cancel_event.is_set() or request_id != active
+
+    def _process(self, user_message: str, request_id: int):
         """主流程"""
         try:
+            if self._is_request_cancelled(request_id):
+                return
             self._log_action("start", user_message)
 
             # 路由
@@ -168,9 +192,12 @@ class StructuredAgent:
                 system=system,
                 tools=None,
             )
+            if self._is_request_cancelled(request_id):
+                _log("Request cancelled after LLM response; dropping output")
+                return
 
             # XML 解析 + 执行
-            self._handle_structured_response(response, tools, system, rounds=0)
+            self._handle_structured_response(response, tools, system, rounds=0, request_id=request_id)
 
         except Exception as e:
             tb = traceback.format_exc()
@@ -179,8 +206,10 @@ class StructuredAgent:
             self._log_action("error", error_msg)
             self._fire_callback(self.on_error, error_msg)
 
-    def _handle_structured_response(self, response: LLMResponse, tools: list, system: str, rounds: int):
+    def _handle_structured_response(self, response: LLMResponse, tools: list, system: str, rounds: int, request_id: int):
         """解析 LLM 文本输出，提取并执行工具调用"""
+        if self._is_request_cancelled(request_id):
+            return
         raw_text = response.text or ""
 
         # XML 解析
@@ -203,6 +232,8 @@ class StructuredAgent:
         # 执行工具
         result_parts = []
         for tc in parsed.tool_calls:
+            if self._is_request_cancelled(request_id):
+                return
             # 验证
             error = validate_tool_call(tc, tools)
             if error:
@@ -214,12 +245,17 @@ class StructuredAgent:
                 result_parts.append(f"❌ {tc.name}: execute_python 已被禁用")
                 continue
 
-            _log(f"Executing: {tc.name}({tc.arguments})")
-            self._fire_callback(self.on_tool_call, tc.name, tc.arguments)
+            raw_args = tc.arguments or {}
+            normalized_args = normalize_tool_args(tc.name, raw_args)
+            normalized_args = self._maybe_expand_shader_inspect_args(tc.name, raw_args, normalized_args)
+            _log(f"Executing: {tc.name}({normalized_args})")
+            self._fire_callback(self.on_tool_call, tc.name, normalized_args)
 
             # 主线程执行
-            result = self._execute_in_main_thread(execute_tool, tc.name, tc.arguments)
-            self._log_action("tool", tc.name, tc.arguments, result)
+            result = self._execute_in_main_thread(execute_tool, tc.name, normalized_args)
+            if self._is_request_cancelled(request_id):
+                return
+            self._log_action("tool", tc.name, normalized_args, result)
 
             if result.get("success"):
                 result_str = json.dumps(result.get("result"), ensure_ascii=False)
@@ -235,6 +271,8 @@ class StructuredAgent:
             _log(f"Max tool rounds ({self.MAX_TOOL_ROUNDS}) reached, stopping")
             self.conversation_history.append({"role": "user", "content": results_text + "\n[已达最大工具调用轮数，请总结结果]"})
             final = self.llm.chat(messages=self.conversation_history, system=system, tools=None)
+            if self._is_request_cancelled(request_id):
+                return
             if final.text:
                 self._fire_callback(self.on_message, "assistant", final.text)
                 self.conversation_history.append({"role": "assistant", "content": final.text})
@@ -249,9 +287,60 @@ class StructuredAgent:
             system=system,
             tools=None,
         )
+        if self._is_request_cancelled(request_id):
+            return
 
         # 递归处理（可能还有工具调用）
-        self._handle_structured_response(next_response, tools, system, rounds + 1)
+        self._handle_structured_response(next_response, tools, system, rounds + 1, request_id=request_id)
+
+    def _maybe_expand_shader_inspect_args(self, tool_name: str, raw_args: dict, normalized_args: dict) -> dict:
+        """Structured 模式下的 inspect 自动检索扩展"""
+        try:
+            if tool_name != "shader_inspect_nodes":
+                return normalized_args
+
+            plan = plan_shader_inspect(raw_args, normalized_args)
+            self._log_action("metric", {
+                "name": "shader_read_plan",
+                "tool": tool_name,
+                "reason": plan.get("reason"),
+                "cost": plan.get("cost", {}),
+                "material_name": normalized_args.get("material_name") or raw_args.get("material_name"),
+            })
+            if not plan.get("auto_search"):
+                return normalized_args
+
+            search_args = plan.get("search_args") or {}
+
+            self._fire_callback(self.on_tool_call, "shader_search_index", search_args)
+            search_result = self._execute_in_main_thread(execute_tool, "shader_search_index", search_args)
+            self._log_action("tool", "shader_search_index", search_args, search_result)
+            result_payload = search_result.get("result") or {}
+            self._log_action("metric", {
+                "name": "shader_search_index_result",
+                "success": bool(search_result.get("success")),
+                "material_name": search_args.get("material_name"),
+                "query": search_args.get("query"),
+                "candidate_count": int(result_payload.get("candidate_count", 0)) if isinstance(result_payload, dict) else 0,
+            })
+
+            if not search_result.get("success"):
+                return normalized_args
+            payload = result_payload
+            candidates = payload.get("candidates") or []
+            node_names = [c.get("node_name") for c in candidates if isinstance(c, dict) and c.get("node_name")]
+            if not node_names:
+                return normalized_args
+
+            expanded = dict(normalized_args)
+            expanded["node_names"] = node_names[:8]
+            expanded["include_values"] = True
+            expanded["compact"] = False
+            expanded["limit"] = min(max(len(expanded["node_names"]), int(expanded.get("limit", 30))), 80)
+            return expanded
+        except Exception as e:
+            _log(f"auto-search expand failed: {e}")
+            return normalized_args
 
     def _execute_in_main_thread(self, func, *args) -> dict:
         """在 Blender 主线程执行"""
@@ -314,6 +403,10 @@ class StructuredAgent:
                 action_log.end_session(f"错误: {args[0][:200]}")
             elif action_type == "end":
                 action_log.end_session(args[0] if args else "")
+            elif action_type == "metric":
+                payload = args[0] if args else {}
+                metric_name = payload.get("name", "unknown_metric")
+                action_log.log_metric(metric_name, payload)
         except Exception:
             pass
 
