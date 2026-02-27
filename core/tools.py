@@ -45,7 +45,7 @@ TOOL_GROUPS = {
         "scene_add_light", "scene_modify_light",
         "scene_add_camera", "scene_set_active_camera",
         "scene_add_modifier", "scene_set_modifier_param", "scene_remove_modifier",
-        "scene_manage_collection", "scene_set_world",
+        "scene_manage_collection", "scene_set_world", "scene_setup_daylight_water",
         "scene_duplicate_object", "scene_parent_object", "scene_set_visibility",
         "scene_get_render_settings", "scene_set_render_settings",
         "scene_get_object_materials", "scene_get_world_info",

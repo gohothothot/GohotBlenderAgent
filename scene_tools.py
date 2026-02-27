@@ -245,6 +245,82 @@ def scene_set_world(color: list = None, strength: float = 1.0,
         return _result(False, None, str(e))
 
 
+def scene_setup_daylight_water(
+    sun_energy: float = 4.0,
+    sun_angle: float = 1.2,
+    sun_elevation: float = 35.0,
+    sun_rotation: float = 25.0,
+    sky_strength: float = 1.3,
+) -> dict:
+    """为水材质快速配置可见日光反射：Nishita 天空 + SUN 灯 + EEVEE 反射设置"""
+    try:
+        world = bpy.context.scene.world
+        if world is None:
+            world = bpy.data.worlds.new("World")
+            bpy.context.scene.world = world
+        world.use_nodes = True
+        nodes = world.node_tree.nodes
+        links = world.node_tree.links
+        nodes.clear()
+
+        sky = nodes.new("ShaderNodeTexSky")
+        sky.location = (-450, 0)
+        bg = nodes.new("ShaderNodeBackground")
+        bg.location = (-150, 0)
+        out = nodes.new("ShaderNodeOutputWorld")
+        out.location = (120, 0)
+        links.new(sky.outputs["Color"], bg.inputs["Color"])
+        links.new(bg.outputs["Background"], out.inputs["Surface"])
+
+        # Nishita 在室外日光/天空反射上通常更稳定
+        if hasattr(sky, "sky_type"):
+            sky.sky_type = "NISHITA"
+        if hasattr(sky, "sun_elevation"):
+            sky.sun_elevation = math.radians(float(sun_elevation))
+        if hasattr(sky, "sun_rotation"):
+            sky.sun_rotation = math.radians(float(sun_rotation))
+        bg.inputs["Strength"].default_value = float(sky_strength)
+
+        sun_obj = None
+        for obj in bpy.data.objects:
+            if obj.type == "LIGHT" and getattr(obj.data, "type", "") == "SUN":
+                sun_obj = obj
+                break
+        if sun_obj is None:
+            sun_data = bpy.data.lights.new(name="AgentSun", type="SUN")
+            sun_obj = bpy.data.objects.new("AgentSun", sun_data)
+            bpy.context.collection.objects.link(sun_obj)
+
+        sun_obj.data.energy = float(sun_energy)
+        if hasattr(sun_obj.data, "angle"):
+            sun_obj.data.angle = math.radians(float(sun_angle))
+        sun_obj.rotation_euler = (
+            math.radians(90.0 - float(sun_elevation)),
+            0.0,
+            math.radians(float(sun_rotation)),
+        )
+
+        scene = bpy.context.scene
+        if hasattr(scene, "eevee"):
+            scene.eevee.use_ssr = True
+            scene.eevee.use_ssr_refraction = True
+
+        return _result(
+            True,
+            {
+                "world": "Nishita Sky",
+                "sun_light": sun_obj.name,
+                "sun_energy": float(sun_energy),
+                "sun_angle_deg": float(sun_angle),
+                "sun_elevation_deg": float(sun_elevation),
+                "sun_rotation_deg": float(sun_rotation),
+                "sky_strength": float(sky_strength),
+            },
+        )
+    except Exception as e:
+        return _result(False, None, str(e))
+
+
 def scene_duplicate_object(name: str, linked: bool = False, new_name: str = None) -> dict:
     try:
         if name not in bpy.data.objects:
@@ -560,6 +636,7 @@ def execute_scene_tool(tool_name: str, arguments: dict) -> dict:
         "scene_remove_modifier": scene_remove_modifier,
         "scene_manage_collection": scene_manage_collection,
         "scene_set_world": scene_set_world,
+        "scene_setup_daylight_water": scene_setup_daylight_water,
         "scene_duplicate_object": scene_duplicate_object,
         "scene_parent_object": scene_parent_object,
         "scene_set_visibility": scene_set_visibility,

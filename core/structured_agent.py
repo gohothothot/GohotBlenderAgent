@@ -21,6 +21,7 @@
 import json
 import threading
 import traceback
+from types import SimpleNamespace
 from typing import Callable, Optional
 
 from .llm import UnifiedLLM, LLMConfig, LLMResponse
@@ -34,7 +35,13 @@ from .tools import (
 from .xml_parser import parse as parse_xml, build_tool_catalog, validate_tool_call
 from .tool_policies import normalize_tool_args
 from .shader_read_planner import plan_shader_inspect
-from .safety_guard import looks_like_python_script, looks_like_script_output
+from .safety_guard import (
+    looks_like_python_script,
+    looks_like_script_output,
+    references_foreign_toolset,
+    looks_like_final_summary,
+)
+from .pseudo_tool_parser import extract_pseudo_tool_calls
 
 
 def _log(msg: str):
@@ -199,7 +206,14 @@ class StructuredAgent:
                 return
 
             # XML 解析 + 执行
-            self._handle_structured_response(response, tools, system, rounds=0, request_id=request_id)
+            self._handle_structured_response(
+                response,
+                tools,
+                system,
+                rounds=0,
+                request_id=request_id,
+                had_tool_activity=False,
+            )
 
         except Exception as e:
             tb = traceback.format_exc()
@@ -208,7 +222,16 @@ class StructuredAgent:
             self._log_action("error", error_msg)
             self._fire_callback(self.on_error, error_msg)
 
-    def _handle_structured_response(self, response: LLMResponse, tools: list, system: str, rounds: int, request_id: int, allow_repair: bool = True):
+    def _handle_structured_response(
+        self,
+        response: LLMResponse,
+        tools: list,
+        system: str,
+        rounds: int,
+        request_id: int,
+        allow_repair: bool = True,
+        had_tool_activity: bool = False,
+    ):
         """解析 LLM 文本输出，提取并执行工具调用"""
         if self._is_request_cancelled(request_id):
             return
@@ -217,26 +240,83 @@ class StructuredAgent:
         # XML 解析
         parsed = parse_xml(raw_text)
         _log(f"Parsed: text={len(parsed.text)} chars, tool_calls={len(parsed.tool_calls)}")
+        effective_tool_calls = list(parsed.tool_calls)
+        if (not effective_tool_calls) and raw_text:
+            available_names = {t.get("name") for t in (tools or []) if isinstance(t, dict)}
+            pseudo_calls = extract_pseudo_tool_calls(raw_text, available_names)
+            if pseudo_calls:
+                effective_tool_calls = [
+                    SimpleNamespace(name=pc.get("name", ""), arguments=pc.get("arguments") or {})
+                    for pc in pseudo_calls
+                ]
+                _log(f"Recovered pseudo tool calls from text: {len(effective_tool_calls)}")
+                for tc in effective_tool_calls:
+                    self._fire_callback(
+                        self.on_tool_call,
+                        f"__pseudo_recovered__:{tc.name}",
+                        tc.arguments,
+                    )
 
-        # 显示纯文本部分：有工具调用时不展示中间文本，避免 UI 出现伪代码步骤
-        if parsed.text and (not parsed.has_tool_calls):
+        # 显示纯文本部分：有工具调用时不展示中间文本；
+        # 对“无工具调用且仍可纠偏”的场景也不展示，避免先说后做。
+        if parsed.text and (not effective_tool_calls) and (not allow_repair):
             self._fire_callback(self.on_message, "assistant", parsed.text)
 
-        if not parsed.has_tool_calls:
+        if not effective_tool_calls:
+            if raw_text and references_foreign_toolset(raw_text):
+                if allow_repair:
+                    _log("Detected foreign toolset response, forcing retry with local MCP tools")
+                    self._force_tool_retry(request_id, tools, system, rounds, had_tool_activity=had_tool_activity)
+                    return
+                err = "[WRONG_TOOLSET] 当前模型未使用 Blender MCP 工具集。请切换模型后重试。"
+                self._fire_callback(self.on_error, err)
+                self._log_action("error", err)
+                self._log_action("end", err)
+                return
+            if had_tool_activity:
+                # 本请求已经执行过工具：允许正常纯文本收尾，不再按 NO_TOOLCALL 失败
+                if raw_text:
+                    if not looks_like_final_summary(raw_text):
+                        _log("Post-tool text does not look final, forcing continuation")
+                        self._force_tool_retry(
+                            request_id, tools, system, rounds, had_tool_activity=had_tool_activity
+                        )
+                        return
+                    self.conversation_history.append({"role": "assistant", "content": raw_text})
+                    self._log_action("end", (parsed.text or raw_text)[:200])
+                    return
+                err = "[NO_TOOLCALL] 工具执行后未返回有效总结文本。"
+                self._fire_callback(self.on_error, err)
+                self._log_action("error", err)
+                self._log_action("end", err)
+                return
+
+            if not allow_repair:
+                # 工具轮后的最终收尾允许纯文本总结（无需再输出 XML）
+                if raw_text:
+                    self.conversation_history.append({"role": "assistant", "content": raw_text})
+                    self._log_action("end", (parsed.text or raw_text)[:200])
+                    return
+                err = "[NO_TOOLCALL] 工具执行后未返回有效总结文本。"
+                self._fire_callback(self.on_error, err)
+                self._log_action("error", err)
+                self._log_action("end", err)
+                return
+
             if raw_text and (looks_like_python_script(raw_text) or looks_like_script_output(raw_text)):
                 if allow_repair:
                     _log("Detected script-like output without XML tool_call, forcing retry")
-                    self._force_tool_retry(request_id, tools, system, rounds)
+                    self._force_tool_retry(request_id, tools, system, rounds, had_tool_activity=had_tool_activity)
                     return
-                err = "检测到模型返回脚本/伪代码内容，已拦截。请重试（系统将强制使用 MCP 工具）。"
+                err = "[NO_TOOLCALL] 检测到模型返回脚本/伪代码内容，已拦截。请重试（系统将强制使用 MCP 工具）。"
                 self._fire_callback(self.on_error, err)
                 self._log_action("error", err)
                 return
             if allow_repair:
                 _log("No XML tool_call found, forcing retry")
-                self._force_tool_retry(request_id, tools, system, rounds)
+                self._force_tool_retry(request_id, tools, system, rounds, had_tool_activity=had_tool_activity)
                 return
-            err = "模型未返回任何 XML 工具调用，任务未执行。建议切换模型或改用 Native Tool Use 模式后重试。"
+            err = "[NO_TOOLCALL] 模型未返回任何 XML 工具调用，任务未执行。建议切换模型或改用 Native Tool Use 模式后重试。"
             self._fire_callback(self.on_error, err)
             self._log_action("error", err)
             self._log_action("end", err)
@@ -247,7 +327,8 @@ class StructuredAgent:
 
         # 执行工具
         result_parts = []
-        for tc in parsed.tool_calls:
+        next_had_tool_activity = had_tool_activity
+        for tc in effective_tool_calls:
             if self._is_request_cancelled(request_id):
                 return
             # 验证
@@ -265,6 +346,7 @@ class StructuredAgent:
             normalized_args = normalize_tool_args(tc.name, raw_args)
             normalized_args = self._maybe_expand_shader_inspect_args(tc.name, raw_args, normalized_args)
             _log(f"Executing: {tc.name}({normalized_args})")
+            next_had_tool_activity = True
             self._fire_callback(self.on_tool_call, tc.name, normalized_args)
 
             # 主线程执行
@@ -322,16 +404,35 @@ class StructuredAgent:
             return
 
         # 递归处理（可能还有工具调用）
-        self._handle_structured_response(next_response, tools, system, rounds + 1, request_id=request_id)
+        # 工具轮之后允许模型直接给最终文本总结，不再强制继续输出 XML tool_call
+        self._handle_structured_response(
+            next_response,
+            tools,
+            system,
+            rounds + 1,
+            request_id=request_id,
+            allow_repair=False,
+            had_tool_activity=next_had_tool_activity,
+        )
 
-    def _force_tool_retry(self, request_id: int, tools: list, system: str, rounds: int):
+    def _force_tool_retry(
+        self,
+        request_id: int,
+        tools: list,
+        system: str,
+        rounds: int,
+        had_tool_activity: bool = False,
+    ):
         if self._is_request_cancelled(request_id):
             return
         try:
+            tool_names = [t.get("name") for t in (tools or []) if isinstance(t, dict) and t.get("name")]
+            tool_hint = ", ".join(tool_names[:40])
             repair_msg = (
                 "[系统纠偏] 你刚刚没有正确调用工具（或输出了脚本/伪代码），这是被禁止的。"
                 "必须改为使用 <tool_call> 调用 MCP 工具；禁止任何 Python 代码块、函数调用示例、代码围栏。"
-                "现在请立即输出至少一个 <tool_call>。"
+                "你只能使用以下本地 Blender 工具集，不可使用 bash_tool/str_replace 等外部工具："
+                f"{tool_hint}。现在请立即输出至少一个 <tool_call>。"
             )
             self.conversation_history.append({"role": "user", "content": repair_msg})
             response = self.llm.chat(
@@ -348,6 +449,7 @@ class StructuredAgent:
                 rounds=rounds,
                 request_id=request_id,
                 allow_repair=False,
+                had_tool_activity=had_tool_activity,
             )
         except Exception as e:
             self._fire_callback(self.on_error, f"纠偏重试失败: {e}")

@@ -6,7 +6,7 @@ import bpy
 import json
 import os
 from datetime import datetime
-from bpy.props import StringProperty, CollectionProperty, IntProperty, BoolProperty, EnumProperty
+from bpy.props import StringProperty, CollectionProperty, IntProperty, BoolProperty, EnumProperty, FloatProperty
 from bpy.types import PropertyGroup, Operator, Panel, AddonPreferences, UIList
 
 
@@ -66,6 +66,30 @@ class BlenderAgentPreferences(AddonPreferences):
         name="无工具调用自动回退",
         description="当当前模式未触发任何工具调用时，自动切换到另一种模式重试一次",
         default=True,
+    )
+    ui_readable_mode: BoolProperty(
+        name="阅读模式（大字号）",
+        description="提高插件面板可读性（不影响 Blender 全局字体）",
+        default=True,
+    )
+    ui_scale_factor: FloatProperty(
+        name="阅读缩放",
+        description="面板控件纵向缩放，建议 1.1~1.5",
+        default=1.2,
+        min=1.0,
+        max=1.8,
+    )
+    ui_theme_preset: EnumProperty(
+        name="主题预设",
+        description="插件界面风格预设（Catppuccin 低对比风格）",
+        items=[
+            ("system", "跟随系统", "使用 Blender 当前主题"),
+            ("catppuccin_latte", "Catppuccin Latte", "浅色、柔和低对比"),
+            ("catppuccin_frappe", "Catppuccin Frappe", "中暗、柔和低对比"),
+            ("catppuccin_macchiato", "Catppuccin Macchiato", "暗色、柔和低对比"),
+            ("catppuccin_mocha", "Catppuccin Mocha", "深暗、柔和低对比"),
+        ],
+        default="catppuccin_mocha",
     )
 
     ai_permission_level: EnumProperty(
@@ -139,6 +163,10 @@ class BlenderAgentPreferences(AddonPreferences):
         box = layout.box()
         box.prop(self, "agent_mode")
         box.prop(self, "auto_fallback_on_no_toolcall")
+        box.prop(self, "ui_readable_mode")
+        if self.ui_readable_mode:
+            box.prop(self, "ui_scale_factor")
+        box.prop(self, "ui_theme_preset")
         if self.agent_mode == "structured":
             box.label(text="ℹ️ XML 模式：LLM 生成文本 + XML 标签，更省 token", icon='INFO')
         layout.separator()
@@ -208,6 +236,7 @@ class AgentState(PropertyGroup):
     last_exec_mode: StringProperty(name="Last Exec Mode", default="")
     fallback_attempted: BoolProperty(name="Fallback Attempted", default=False)
     request_had_tool_call: BoolProperty(name="Request Had Tool Call", default=False)
+    pseudo_fallback_hits: IntProperty(name="Pseudo Fallback Hits", default=0)
     todo_input: StringProperty(name="Todo Input", default="")
     todo_type_input: EnumProperty(
         name="Todo Type",
@@ -289,10 +318,79 @@ def _draw_health_badge(layout, state: AgentState):
         layout.label(text=f"工具执行状态: 回退重试中（模式: {mode}）", icon="FILE_REFRESH")
     elif status in ("no_toolcall", "error"):
         layout.label(text=f"工具执行状态: 未执行工具（模式: {mode}）", icon="ERROR")
+    elif status == "error_after_toolcall":
+        layout.label(text=f"工具执行状态: 已执行工具但后续失败（模式: {mode}）", icon="ERROR")
     elif status == "processing":
         layout.label(text=f"工具执行状态: 执行中（模式: {mode}）", icon="SORTTIME")
     else:
         layout.label(text="工具执行状态: 待机", icon="INFO")
+    try:
+        prefs = get_preferences()
+        layout.label(text=f"界面主题: {_theme_hint(prefs)}", icon="COLOR")
+    except Exception:
+        pass
+    if int(getattr(state, "pseudo_fallback_hits", 0)) > 0:
+        layout.label(text=f"伪调用兜底命中: {int(state.pseudo_fallback_hits)} 次", icon="INFO")
+
+
+def _draw_quick_actions(layout, popup: bool = False):
+    row = layout.row(align=True)
+    row.operator("agent.open_settings", text="设置", icon="PREFERENCES")
+    if popup:
+        row.operator("agent.view_performance_report", text="性能", icon="GRAPH")
+        row.operator("agent.export_performance_report", text="", icon="EXPORT")
+    else:
+        row.operator("agent.open_chat", text="弹窗", icon="WINDOW")
+        row.operator("agent.view_performance_report", text="性能", icon="GRAPH")
+        row.operator("agent.export_performance_report", text="", icon="EXPORT")
+
+
+def _theme_label(prefs) -> str:
+    mapping = {
+        "system": "System",
+        "catppuccin_latte": "Latte",
+        "catppuccin_frappe": "Frappe",
+        "catppuccin_macchiato": "Macchiato",
+        "catppuccin_mocha": "Mocha",
+    }
+    return mapping.get(getattr(prefs, "ui_theme_preset", "system"), "System")
+
+
+def _theme_hint(prefs) -> str:
+    preset = getattr(prefs, "ui_theme_preset", "system")
+    if preset == "system":
+        return "跟随 Blender 主题"
+    return f"Catppuccin · {_theme_label(prefs)} · Soft"
+
+
+def _theme_mark(prefs) -> str:
+    preset = getattr(prefs, "ui_theme_preset", "system")
+    marks = {
+        "system": "•",
+        "catppuccin_latte": "☼",
+        "catppuccin_frappe": "◐",
+        "catppuccin_macchiato": "◑",
+        "catppuccin_mocha": "☾",
+    }
+    return marks.get(preset, "•")
+
+
+def _is_mocha(prefs) -> bool:
+    return getattr(prefs, "ui_theme_preset", "system") == "catppuccin_mocha"
+
+
+def _section_title(box, title: str, icon: str = "INFO", subtitle: str = ""):
+    row = box.row(align=True)
+    row.label(text=title, icon=icon)
+    if subtitle:
+        row.label(text=subtitle)
+
+
+def _scaled_container(layout, prefs):
+    container = layout.column(align=False)
+    if getattr(prefs, "ui_readable_mode", False):
+        container.scale_y = max(1.0, float(getattr(prefs, "ui_scale_factor", 1.2)))
+    return container
 
 
 def _execute_in_main_thread(func, *args):
@@ -341,8 +439,13 @@ def _on_tool_call(tool_name: str, args: dict):
     state = _get_state()
     state.request_had_tool_call = True
     state.last_exec_status = "ok"
+    if tool_name.startswith("__pseudo_recovered__:"):
+        state.pseudo_fallback_hits += 1
+        shown_name = tool_name.replace("__pseudo_recovered__:", "")
+    else:
+        shown_name = tool_name
     args_preview = json.dumps(args, ensure_ascii=False)[:200] if args else ""
-    _add_message("system", f"🔧 调用工具: {tool_name}\n{args_preview}")
+    _add_message("system", f"🔧 调用工具: {shown_name}\n{args_preview}")
 
 
 def _on_plan(plan_text: str):
@@ -367,7 +470,7 @@ def _on_error(error: str):
     state = _get_state()
     prefs = get_preferences()
 
-    no_toolcall_error = ("未返回任何工具调用" in error) or ("任务未执行" in error)
+    no_toolcall_error = ("[NO_TOOLCALL]" in error)
     can_fallback = (
         bool(getattr(prefs, "auto_fallback_on_no_toolcall", True))
         and no_toolcall_error
@@ -385,7 +488,10 @@ def _on_error(error: str):
 
     _add_message("system", f"❌ 错误: {error}")
     state.is_processing = False
-    state.last_exec_status = "no_toolcall" if no_toolcall_error else "error"
+    if no_toolcall_error:
+        state.last_exec_status = "no_toolcall"
+    else:
+        state.last_exec_status = "error_after_toolcall" if state.request_had_tool_call else "error"
 
 
 def _on_permission_request(tool_name: str, args: dict, risk: str, reason: str):
@@ -494,6 +600,7 @@ class AGENT_OT_SendMessage(Operator):
         state.fallback_attempted = False
         state.last_exec_status = "processing"
         state.last_exec_mode = prefs.agent_mode
+        state.pseudo_fallback_hits = 0
         _send_message_with_mode(user_msg, prefs.agent_mode)
 
         return {"FINISHED"}
@@ -754,6 +861,7 @@ class AGENT_OT_SendTodoToAgent(Operator):
             state.fallback_attempted = False
             state.last_exec_status = "processing"
             state.last_exec_mode = prefs.agent_mode
+            state.pseudo_fallback_hits = 0
             _send_message_with_mode(msg, prefs.agent_mode)
         return {"FINISHED"}
 
@@ -770,17 +878,22 @@ class AGENT_OT_OpenChat(Operator):
         layout = self.layout
         state = _get_state()
         prefs = get_preferences()
+        ui = _scaled_container(layout, prefs)
 
         if not prefs.api_key:
-            box = layout.box()
+            box = ui.box()
             box.label(text="⚠️ 请先配置 API Key", icon='ERROR')
             box.operator("agent.open_settings", text="打开设置", icon='PREFERENCES')
             return
 
-        box = layout.box()
-        row = box.row()
-        row.label(text="对话历史", icon="CONSOLE")
-        row.operator("agent.clear_history", text="", icon="TRASH")
+        header = ui.box()
+        header.label(text=f"{_theme_mark(prefs)} Blender Agent", icon='OUTLINER_OB_LIGHT')
+        _draw_health_badge(header, state)
+
+        box = ui.box()
+        _section_title(box, "会话", icon="CONSOLE", subtitle="Soft" if _is_mocha(prefs) else "")
+        row = box.row(align=True)
+        row.operator("agent.clear_history", text="清空", icon="TRASH")
 
         box.template_list(
             "AGENT_UL_message_list",
@@ -792,10 +905,8 @@ class AGENT_OT_OpenChat(Operator):
             rows=8,
             maxrows=12,
         )
-        _draw_health_badge(layout, state)
-
         if state.pending_code:
-            code_box = layout.box()
+            code_box = ui.box()
             code_box.label(text="⚠️ 待确认代码:", icon="ERROR")
             code_box.label(text=state.pending_code_desc)
             code_preview = state.pending_code[:500]
@@ -810,7 +921,7 @@ class AGENT_OT_OpenChat(Operator):
             op_no.approved = False
 
         if state.pending_permission_tool:
-            perm_box = layout.box()
+            perm_box = ui.box()
             perm_box.label(text="🔐 待确认高权限操作:", icon="LOCKED")
             perm_box.label(text=f"工具: {state.pending_permission_tool}")
             perm_box.label(text=f"风险: {state.pending_permission_risk}")
@@ -821,22 +932,25 @@ class AGENT_OT_OpenChat(Operator):
             op_no = row.operator("agent.confirm_permission", text="❌ 拒绝", icon="X")
             op_no.approved = False
 
-        layout.separator()
+        ui.separator()
 
         if state.is_processing:
-            row = layout.row(align=True)
+            row = ui.row(align=True)
             row.label(text="⏳ AI 正在思考...", icon="SORTTIME")
             row.operator("agent.stop_processing", text="中止", icon="CANCEL")
         else:
-            row = layout.row(align=True)
+            input_box = ui.box() if _is_mocha(prefs) else ui
+            if _is_mocha(prefs):
+                _section_title(input_box, "输入", icon="GREASEPENCIL")
+            row = input_box.row(align=True)
             row.prop(state, "input_text", text="")
-            row.operator("agent.send_message", text="", icon="PLAY")
+            row.operator("agent.send_message", text="发送", icon="PLAY")
 
-        layout.separator()
-        row = layout.row(align=True)
-        row.operator("agent.open_settings", text="设置", icon="PREFERENCES")
-        row.operator("agent.view_performance_report", text="性能报告", icon="GRAPH")
-        row.operator("agent.export_performance_report", text="", icon="EXPORT")
+        ui.separator()
+        actions = ui.box() if _is_mocha(prefs) else ui
+        if _is_mocha(prefs):
+            _section_title(actions, "操作", icon="TOOL_SETTINGS")
+        _draw_quick_actions(actions, popup=True)
 
     def invoke(self, context, event):
         prefs = get_preferences()
@@ -864,20 +978,25 @@ class AGENT_PT_MainPanel(Panel):
         layout = self.layout
         state = _get_state()
         prefs = get_preferences()
+        ui = _scaled_container(layout, prefs)
 
         if not prefs.api_key:
-            box = layout.box()
+            box = ui.box()
             box.label(text="⚠️ 请先配置 API Key", icon='ERROR')
             box.operator("agent.open_settings", text="打开设置", icon='PREFERENCES')
             return
 
         if len(state.messages) == 0:
-            layout.label(text="你好！在下方输入需求，我会直接操作 Blender。", icon='INFO')
+            ui.label(text="你好！在下方输入需求，我会直接操作 Blender。", icon='INFO')
 
-        box = layout.box()
-        row = box.row()
-        row.label(text="对话", icon='CONSOLE')
-        row.operator("agent.clear_history", text="", icon='TRASH')
+        header = ui.box()
+        header.label(text=f"{_theme_mark(prefs)} Blender Agent", icon='OUTLINER_OB_LIGHT')
+        _draw_health_badge(header, state)
+
+        box = ui.box()
+        _section_title(box, "会话", icon='CONSOLE', subtitle="Soft" if _is_mocha(prefs) else "")
+        row = box.row(align=True)
+        row.operator("agent.clear_history", text="清空", icon='TRASH')
 
         box.template_list(
             "AGENT_UL_message_list",
@@ -889,19 +1008,20 @@ class AGENT_PT_MainPanel(Panel):
             rows=8,
             maxrows=15,
         )
-        _draw_health_badge(layout, state)
-
         if state.is_processing:
-            row = layout.row(align=True)
+            row = ui.row(align=True)
             row.label(text="⏳ AI 正在思考...", icon='SORTTIME')
             row.operator("agent.stop_processing", text="中止", icon='CANCEL')
         else:
-            row = layout.row(align=True)
+            input_box = ui.box() if _is_mocha(prefs) else ui
+            if _is_mocha(prefs):
+                _section_title(input_box, "输入", icon="GREASEPENCIL")
+            row = input_box.row(align=True)
             row.prop(state, "input_text", text="")
-            row.operator("agent.send_message", text="", icon='PLAY')
+            row.operator("agent.send_message", text="发送", icon='PLAY')
 
         if state.pending_code:
-            code_box = layout.box()
+            code_box = ui.box()
             code_box.label(text="⚠️ 待确认代码:", icon='ERROR')
             code_box.label(text=state.pending_code_desc)
             code_preview = state.pending_code[:500]
@@ -916,7 +1036,7 @@ class AGENT_PT_MainPanel(Panel):
             op_no.approved = False
 
         if state.pending_permission_tool:
-            perm_box = layout.box()
+            perm_box = ui.box()
             perm_box.label(text="🔐 待确认高权限操作:", icon='LOCKED')
             perm_box.label(text=f"工具: {state.pending_permission_tool}")
             perm_box.label(text=f"风险: {state.pending_permission_risk}")
@@ -927,13 +1047,10 @@ class AGENT_PT_MainPanel(Panel):
             op_no = row.operator("agent.confirm_permission", text="❌ 拒绝", icon='X')
             op_no.approved = False
 
-        row = layout.row(align=True)
-        row.operator("agent.open_settings", text="设置", icon='PREFERENCES')
-        row.operator("agent.open_chat", text="弹窗模式", icon='WINDOW')
-
-        perf_row = layout.row(align=True)
-        perf_row.operator("agent.view_performance_report", text="性能报告", icon='GRAPH')
-        perf_row.operator("agent.export_performance_report", text="导出", icon='EXPORT')
+        actions = ui.box() if _is_mocha(prefs) else ui
+        if _is_mocha(prefs):
+            _section_title(actions, "操作", icon="TOOL_SETTINGS")
+        _draw_quick_actions(actions, popup=False)
 
 
 class AGENT_OT_ViewPerformanceReport(Operator):

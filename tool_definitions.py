@@ -873,6 +873,21 @@ TOOLS = [
         }
     },
     {
+        "name": "scene_setup_daylight_water",
+        "description": "为水材质快速配置日光与天空反射：创建/复用 SUN 灯、设置 Nishita 天空、启用 EEVEE SSR/折射。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "sun_energy": {"type": "number", "description": "太阳能量，默认 4.0"},
+                "sun_angle": {"type": "number", "description": "太阳角度（度），默认 1.2"},
+                "sun_elevation": {"type": "number", "description": "太阳高度角（度），默认 35"},
+                "sun_rotation": {"type": "number", "description": "太阳方位角（度），默认 25"},
+                "sky_strength": {"type": "number", "description": "天空强度，默认 1.3"}
+            },
+            "required": []
+        }
+    },
+    {
         "name": "scene_duplicate_object",
         "description": "复制物体",
         "input_schema": {

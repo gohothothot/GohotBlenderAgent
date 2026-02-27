@@ -16,7 +16,7 @@ import threading
 import traceback
 from typing import Callable, Optional
 
-from .llm import UnifiedLLM, LLMConfig, LLMResponse
+from .llm import UnifiedLLM, LLMConfig, LLMResponse, ToolCall
 from .router import route as route_message
 from .tools import (
     get_all_tools,
@@ -27,7 +27,13 @@ from .tools import (
 )
 from .tool_policies import normalize_tool_args
 from .shader_read_planner import plan_shader_inspect
-from .safety_guard import looks_like_python_script, looks_like_script_output
+from .safety_guard import (
+    looks_like_python_script,
+    looks_like_script_output,
+    references_foreign_toolset,
+    looks_like_final_summary,
+)
+from .pseudo_tool_parser import extract_pseudo_tool_calls
 
 
 def _log(msg: str):
@@ -88,6 +94,7 @@ class BlenderAgent:
         self._active_request_id = 0
         self._cancel_event = threading.Event()
         self._state_lock = threading.Lock()
+        self._had_tool_call_in_request = False
 
         # UI 回调
         self.on_message: Optional[Callable] = None
@@ -147,6 +154,7 @@ class BlenderAgent:
             if self._is_request_cancelled(request_id):
                 return
             self._tool_rounds = 0
+            self._had_tool_call_in_request = False
             # 日志
             self._log_action("start", user_message)
 
@@ -177,8 +185,8 @@ class BlenderAgent:
                 _log("Request cancelled after LLM response; dropping output")
                 return
 
-            # 处理响应
-            self._handle_response(response, tools, request_id)
+            # 处理响应（首轮仍强制工具优先）
+            self._handle_response(response, tools, request_id, allow_repair=True)
 
         except Exception as e:
             tb = traceback.format_exc()
@@ -191,8 +199,9 @@ class BlenderAgent:
         """处理 LLM 响应"""
         if self._is_request_cancelled(request_id):
             return
-        # 文本部分：若本轮包含工具调用，则不展示中间文本，避免“伪代码步骤”污染 UI
-        if response.text and (not response.has_tool_calls):
+        # 文本部分：若本轮包含工具调用则不展示中间文本；
+        # 对“无工具调用且仍可纠偏”的场景也不展示，避免先说后做。
+        if response.text and (not response.has_tool_calls) and (not allow_repair):
             self._fire_callback(self.on_message, "assistant", response.text)
             self._log_action("message", response.text)
 
@@ -203,13 +212,64 @@ class BlenderAgent:
             )
             self._execute_tools(response.tool_calls, tools, request_id)
         else:
+            if response.text and references_foreign_toolset(response.text):
+                if allow_repair:
+                    _log("Detected foreign toolset response, forcing retry with local MCP tools")
+                    self._force_tool_retry(request_id, tools)
+                    return
+                err = "[WRONG_TOOLSET] 当前模型未使用 Blender MCP 工具集。请切换模型后重试。"
+                self._fire_callback(self.on_error, err)
+                self._log_action("error", err)
+                self._log_action("end", err)
+                return
+            if response.text:
+                available_names = {t.get("name") for t in (tools or []) if isinstance(t, dict)}
+                pseudo_calls = extract_pseudo_tool_calls(response.text, available_names)
+                if pseudo_calls:
+                    recovered_calls = [
+                        ToolCall(
+                            id=f"pseudo_{idx}",
+                            name=pc.get("name", ""),
+                            arguments=pc.get("arguments") or {},
+                        )
+                        for idx, pc in enumerate(pseudo_calls, start=1)
+                    ]
+                    _log(f"Recovered pseudo tool calls from text: {len(recovered_calls)}")
+                    for rc in recovered_calls:
+                        self._fire_callback(
+                            self.on_tool_call,
+                            f"__pseudo_recovered__:{rc.name}",
+                            rc.arguments,
+                        )
+                    self._execute_tools(recovered_calls, tools, request_id)
+                    return
             # 无工具调用 — 记录并结束
+            if not allow_repair:
+                # 工具轮后的最终收尾允许纯文本总结
+                if response.text:
+                    if not looks_like_final_summary(response.text):
+                        _log("Post-tool text does not look final, forcing continuation")
+                        self._force_tool_retry(request_id, tools)
+                        return
+                    self._fire_callback(self.on_message, "assistant", response.text)
+                    self._log_action("message", response.text)
+                    self.conversation_history.append(
+                        {"role": "assistant", "content": response.text}
+                    )
+                    self._log_action("end", response.text[:200])
+                    return
+                err = "[NO_TOOLCALL] 工具执行后未返回有效总结文本。"
+                self._fire_callback(self.on_error, err)
+                self._log_action("error", err)
+                self._log_action("end", err)
+                return
+
             if response.text and (looks_like_python_script(response.text) or looks_like_script_output(response.text)):
                 if allow_repair:
                     _log("Detected script-like output without tools, forcing tool retry")
                     self._force_tool_retry(request_id, tools)
                     return
-                err = "检测到模型返回脚本/伪代码内容，已拦截。请重试（系统将强制使用 MCP 工具）。"
+                err = "[NO_TOOLCALL] 检测到模型返回脚本/伪代码内容，已拦截。请重试（系统将强制使用 MCP 工具）。"
                 self._fire_callback(self.on_error, err)
                 self._log_action("error", err)
                 return
@@ -217,7 +277,7 @@ class BlenderAgent:
                 _log("No tool calls returned, forcing tool retry")
                 self._force_tool_retry(request_id, tools)
                 return
-            err = "模型未返回任何工具调用，任务未执行。建议切换模型或改用 Structured XML 模式后重试。"
+            err = "[NO_TOOLCALL] 模型未返回任何工具调用，任务未执行。建议切换模型或改用 Structured XML 模式后重试。"
             self._fire_callback(self.on_error, err)
             self._log_action("error", err)
             self._log_action("end", err)
@@ -240,6 +300,7 @@ class BlenderAgent:
             normalized_args = normalize_tool_args(tc.name, raw_args)
             normalized_args = self._maybe_expand_shader_inspect_args(tc.name, raw_args, normalized_args)
             _log(f"Executing: {tc.name}")
+            self._had_tool_call_in_request = True
             self._fire_callback(self.on_tool_call, tc.name, normalized_args)
 
             # 在主线程执行
@@ -371,7 +432,14 @@ class BlenderAgent:
             if self._is_request_cancelled(request_id):
                 _log("Request cancelled after continue-call response; dropping output")
                 return
-            self._handle_response(response, tools, request_id)
+            # 只在“未发生任何工具调用”的阶段强制纠偏；
+            # 一旦本请求已执行过工具，后续允许自然收尾文本。
+            self._handle_response(
+                response,
+                tools,
+                request_id,
+                allow_repair=not self._had_tool_call_in_request,
+            )
 
         except Exception as e:
             error_msg = str(e)
@@ -424,10 +492,13 @@ class BlenderAgent:
         if self._is_request_cancelled(request_id):
             return
         try:
+            tool_names = [t.get("name") for t in (tools or []) if isinstance(t, dict) and t.get("name")]
+            tool_hint = ", ".join(tool_names[:40])
             repair_msg = (
                 "[系统纠偏] 你刚刚没有正确调用工具（或输出了脚本/伪代码），这是被禁止的。"
                 "必须改为调用 MCP 工具完成任务；禁止任何 Python 代码块、函数调用示例、代码围栏。"
-                "现在请立即输出 tool calls。"
+                "你只能使用以下本地 Blender 工具集，不可使用 bash_tool/str_replace 等外部工具："
+                f"{tool_hint}。现在请立即输出 tool calls。"
             )
             self.conversation_history.append({"role": "user", "content": repair_msg})
             response = self.llm.chat(

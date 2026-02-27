@@ -61,7 +61,8 @@ class AgentPrompts:
         ),
         "scene": (
             "你是 Blender 场景专家。使用工具操作物体、灯光、相机、修改器。\n"
-            "操作前先用 get_scene_info 或 get_object_info 确认当前状态。"
+            "操作前先用 get_scene_info 或 get_object_info 确认当前状态。\n"
+            "水面/玻璃反射场景优先使用 scene_setup_daylight_water 配置天空与日光。"
         ),
         "animation": (
             "你是 Blender 动画专家。使用 Driver 和关键帧工具创建动画。\n"
