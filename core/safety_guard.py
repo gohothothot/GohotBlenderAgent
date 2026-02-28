@@ -31,6 +31,8 @@ _FOREIGN_TOOLSET_MARKERS = [
 
 _FINALIZE_HINTS = [
     "已完成", "完成", "执行完成", "处理完成", "最终结果", "总结",
+    "已创建", "已设置", "已添加", "已修改", "已删除", "已应用", "已保存",
+    "创建完成", "设置完成", "处理完毕", "完成了",
     "done", "completed", "finished", "final result", "summary",
 ]
 
@@ -73,8 +75,13 @@ def looks_like_final_summary(text: str) -> bool:
     if not text:
         return False
     lowered = text.lower().strip()
-    if len(lowered) < 12:
+    if len(lowered) < 8:
         return False
-    if any(h in lowered for h in _NON_FINAL_HINTS):
+    has_non_final = any(h in lowered for h in _NON_FINAL_HINTS)
+    has_final = any(h in lowered for h in _FINALIZE_HINTS)
+    # 低风险放宽：较长且不含明确“下一步”语义时，允许视为收尾
+    if has_non_final and (not has_final):
         return False
-    return any(h in lowered for h in _FINALIZE_HINTS)
+    if has_final:
+        return True
+    return len(lowered) >= 30

@@ -237,6 +237,7 @@ class AgentState(PropertyGroup):
     fallback_attempted: BoolProperty(name="Fallback Attempted", default=False)
     request_had_tool_call: BoolProperty(name="Request Had Tool Call", default=False)
     pseudo_fallback_hits: IntProperty(name="Pseudo Fallback Hits", default=0)
+    continuation_notice_shown: BoolProperty(name="Continuation Notice Shown", default=False)
     todo_input: StringProperty(name="Todo Input", default="")
     todo_type_input: EnumProperty(
         name="Todo Type",
@@ -322,6 +323,7 @@ def _draw_health_badge(layout, state: AgentState):
         layout.label(text=f"工具执行状态: 已执行工具但后续失败（模式: {mode}）", icon="ERROR")
     elif status == "processing":
         layout.label(text=f"工具执行状态: 执行中（模式: {mode}）", icon="SORTTIME")
+        layout.label(text="提示: AI 可能在继续执行后续步骤，请先等待或点击中止。", icon="INFO")
     else:
         layout.label(text="工具执行状态: 待机", icon="INFO")
     try:
@@ -432,6 +434,25 @@ def _add_message(role: str, content: str, is_code: bool = False):
 def _on_agent_message(role: str, content: str):
     _add_message(role, content)
     state = _get_state()
+    if role != "assistant":
+        return
+
+    # 防止“中间总结文本”被误判为结束：仅当明显是最终总结时才结束处理态
+    is_final = True
+    try:
+        from .core.safety_guard import looks_like_final_summary
+        is_final = looks_like_final_summary(content)
+    except Exception:
+        is_final = True
+
+    if not is_final and (state.request_had_tool_call or state.last_exec_status in ("processing", "fallback_running")):
+        state.is_processing = True
+        state.last_exec_status = "processing"
+        if not state.continuation_notice_shown:
+            state.continuation_notice_shown = True
+            _add_message("system", "⏳ 提醒：AI 还在继续执行后续步骤，不要急着发送下一条。若要打断请点“中止”。")
+        return
+
     state.is_processing = False
 
 
@@ -503,7 +524,7 @@ def _on_permission_request(tool_name: str, args: dict, risk: str, reason: str):
     state.is_processing = False
     _add_message(
         "system",
-        f"🔐 需要权限确认：{state.pending_permission_tool}（风险: {state.pending_permission_risk}）\n{state.pending_permission_reason}",
+        f"🔐 需要权限确认：{state.pending_permission_tool}（风险: {state.pending_permission_risk}）\n{state.pending_permission_reason}\n请点击“允许一次”或“拒绝”。",
     )
 
 
@@ -601,6 +622,7 @@ class AGENT_OT_SendMessage(Operator):
         state.last_exec_status = "processing"
         state.last_exec_mode = prefs.agent_mode
         state.pseudo_fallback_hits = 0
+        state.continuation_notice_shown = False
         _send_message_with_mode(user_msg, prefs.agent_mode)
 
         return {"FINISHED"}
@@ -862,6 +884,7 @@ class AGENT_OT_SendTodoToAgent(Operator):
             state.last_exec_status = "processing"
             state.last_exec_mode = prefs.agent_mode
             state.pseudo_fallback_hits = 0
+            state.continuation_notice_shown = False
             _send_message_with_mode(msg, prefs.agent_mode)
         return {"FINISHED"}
 
