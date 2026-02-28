@@ -20,7 +20,7 @@ from .llm import UnifiedLLM, LLMConfig, LLMResponse, ToolCall
 from .router import route as route_message
 from .tools import (
     get_all_tools,
-    get_tools_for_intent,
+    get_tools_for_llm,
     get_tool_summaries,
     execute_tool,
     truncate_result,
@@ -119,7 +119,7 @@ class BlenderAgent:
         if not self._tools:
             self._load_tools()
 
-        tools = get_tools_for_intent(intent)
+        tools = get_tools_for_llm(intent)
         if not tools:
             _log(f"Intent '{intent}' returned 0 tools, using all {len(self._tools)}")
             tools = self._tools

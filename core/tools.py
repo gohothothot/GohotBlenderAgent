@@ -69,7 +69,7 @@ TOOL_GROUPS = {
 
 # 意图 → 工具组
 INTENT_GROUPS = {
-    "create":      ["basic", "material", "scene", "shader", "search"],
+    "create":      ["basic", "material", "scene", "shader", "meshy", "search"],
     "modify":      ["basic", "material", "shader", "scene", "search"],
     "delete":      ["basic", "scene"],
     "shader":      ["material", "shader", "search"],
@@ -80,7 +80,7 @@ INTENT_GROUPS = {
     "search":      ["search", "meta"],
     "query":       ["basic", "material", "scene", "meta"],
     # general = 常用工具子集（约30个，避免 payload 过大导致 API 500）
-    "general":     ["basic", "material", "scene", "shader", "search", "meta", "file"],
+    "general":     ["basic", "material", "scene", "shader", "meshy", "search", "meta", "file"],
 }
 
 
@@ -91,6 +91,15 @@ def get_tools_for_intent(intent: str) -> list:
     for g in groups:
         names.update(TOOL_GROUPS.get(g, []))
     return [t for t in get_all_tools() if t["name"] in names]
+
+
+def get_tools_for_llm(intent: str) -> list:
+    """LLM 专用工具子集：显式排除 meshy_*，防止与独立 Meshy 通道耦合。"""
+    tools = get_tools_for_intent(intent)
+    return [
+        t for t in tools
+        if isinstance(t, dict) and (not str(t.get("name", "")).startswith("meshy_"))
+    ]
 
 
 # ========== 工具定义缓存 ==========

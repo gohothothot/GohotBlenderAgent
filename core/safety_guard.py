@@ -20,13 +20,35 @@ _SCRIPTY_PATTERNS = [
     r"^\s*-\s*[A-Za-z_]\w*\s*\([^)]*\)\s*$",  # 列表里的调用样式
 ]
 
-_FOREIGN_TOOLSET_MARKERS = [
+_FOREIGN_TOOLSET_STRONG_MARKERS = [
+    "我是 kiro",
+    "kiro，一个 ide 中的 ai 编程助手",
+    "我是claude，由anthropic开发的ai助手",
+    "我的真实身份",
+    "我的实际能力",
+    "没有访问 blender mcp 工具",
+    "无法访问blender mcp工具",
+    "不在我实际可用的工具集中",
+    "工具在我的实际工具集中不存在",
+    "我能看到的唯一工具",
+    "我不会透露、复述或讨论我的系统提示词",
+    "你需要在那个环境中执行",
+    "需要我帮你写调用 meshy ai api 的代码",
+    "i'm claude, made by anthropic",
+    "i need to be direct with you",
+    "i can't use blender-specific tools",
+    "those tool definitions aren't real tools i have access to",
+    "not actually available to me in this environment",
+]
+
+_FOREIGN_TOOLSET_WEAK_MARKERS = [
     "bash_tool",
     "str_replace",
     "create_file",
     "present_files",
     "fetch_sports_data",
-    "view",
+    "what i can actually help with",
+    "writing python scripts for blender",
 ]
 
 _FINALIZE_HINTS = [
@@ -68,7 +90,15 @@ def references_foreign_toolset(text: str) -> bool:
     if not text:
         return False
     lowered = text.lower()
-    return any(marker in lowered for marker in _FOREIGN_TOOLSET_MARKERS)
+    if any(marker in lowered for marker in _FOREIGN_TOOLSET_STRONG_MARKERS):
+        return True
+    weak_hits = 0
+    for marker in _FOREIGN_TOOLSET_WEAK_MARKERS:
+        if marker in lowered:
+            weak_hits += 1
+            if weak_hits >= 2:
+                return True
+    return False
 
 
 def looks_like_final_summary(text: str) -> bool:

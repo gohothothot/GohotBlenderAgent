@@ -5,6 +5,10 @@ Blender Agent Chat UI - 侧边栏 + 弹窗双模式对话界面
 import bpy
 import json
 import os
+import re
+import time
+import base64
+import mimetypes
 from datetime import datetime
 from bpy.props import StringProperty, CollectionProperty, IntProperty, BoolProperty, EnumProperty, FloatProperty
 from bpy.types import PropertyGroup, Operator, Panel, AddonPreferences, UIList
@@ -61,6 +65,15 @@ class BlenderAgentPreferences(AddonPreferences):
             ("structured", "Structured XML", "LLM 生成文本 + XML 标签，外部解析器触发工具（更省 token，兼容性更好）"),
         ],
         default="native",
+    )
+    conversation_mode: EnumProperty(
+        name="对话通道",
+        description="聊天框执行通道：Agent 负责 MCP 操作，Meshy 负责模型生成与导入",
+        items=[
+            ("llm_agent", "Agent", "LLM Agent 对话（材质、场景、修改器、文件等 MCP 工具）"),
+            ("meshy_pipeline", "Meshy", "Meshy 一站式（文生3D/图生3D/自动导入/后处理）"),
+        ],
+        default="llm_agent",
     )
     auto_fallback_on_no_toolcall: BoolProperty(
         name="无工具调用自动回退",
@@ -144,6 +157,32 @@ class BlenderAgentPreferences(AddonPreferences):
         ],
         default="meshy-6",
     )
+    meshy_auto_postprocess: BoolProperty(
+        name="Meshy导入后自动材质优化",
+        description="模型导入后自动做一轮稳定的材质高光/粗糙度优化，便于后续继续编辑",
+        default=True,
+    )
+    meshy_postprocess_preset: EnumProperty(
+        name="Meshy材质优化预设",
+        description="导入后自动材质优化风格",
+        items=[
+            ("realistic", "写实", "通用写实微调"),
+            ("toon", "卡通", "更平滑、低高光、偏NPR"),
+            ("metal", "金属", "高金属度、低粗糙度反射"),
+            ("glass", "玻璃", "高透射、低粗糙度、IOR优化"),
+        ],
+        default="realistic",
+    )
+    meshy_postprocess_strength: EnumProperty(
+        name="Meshy材质优化强度",
+        description="后处理参数应用强度",
+        items=[
+            ("light", "轻度", "小幅微调，尽量保留原始材质"),
+            ("medium", "中度", "平衡微调"),
+            ("strong", "强", "更明显的风格强化"),
+        ],
+        default="medium",
+    )
 
     def draw(self, context):
         layout = self.layout
@@ -161,6 +200,7 @@ class BlenderAgentPreferences(AddonPreferences):
         layout.separator()
         layout.label(text="⚙️ Agent 设置", icon='TOOL_SETTINGS')
         box = layout.box()
+        box.prop(self, "conversation_mode")
         box.prop(self, "agent_mode")
         box.prop(self, "auto_fallback_on_no_toolcall")
         box.prop(self, "ui_readable_mode")
@@ -185,6 +225,10 @@ class BlenderAgentPreferences(AddonPreferences):
         box = layout.box()
         box.prop(self, "meshy_api_key")
         box.prop(self, "meshy_ai_model")
+        box.prop(self, "meshy_auto_postprocess")
+        if self.meshy_auto_postprocess:
+            box.prop(self, "meshy_postprocess_preset")
+            box.prop(self, "meshy_postprocess_strength")
 
         if not self.meshy_api_key:
             box.label(text="⚠️ 请填写 Meshy API Key 才能使用 3D 生成功能", icon='INFO')
@@ -234,10 +278,13 @@ class AgentState(PropertyGroup):
     last_user_message: StringProperty(name="Last User Message", default="")
     last_exec_status: StringProperty(name="Last Exec Status", default="idle")
     last_exec_mode: StringProperty(name="Last Exec Mode", default="")
+    last_route_hint: StringProperty(name="Last Route Hint", default="-")
+    last_stall_reason: StringProperty(name="Last Stall Reason", default="-")
     fallback_attempted: BoolProperty(name="Fallback Attempted", default=False)
     request_had_tool_call: BoolProperty(name="Request Had Tool Call", default=False)
     pseudo_fallback_hits: IntProperty(name="Pseudo Fallback Hits", default=0)
     continuation_notice_shown: BoolProperty(name="Continuation Notice Shown", default=False)
+    continuation_started_at: FloatProperty(name="Continuation Started At", default=0.0)
     todo_input: StringProperty(name="Todo Input", default="")
     todo_type_input: EnumProperty(
         name="Todo Type",
@@ -299,7 +346,106 @@ def _fallback_mode(mode: str) -> str:
     return "structured" if mode == "native" else "native"
 
 
+def _infer_route_hint(user_msg: str) -> str:
+    lowered = (user_msg or "").strip().lower()
+    if not lowered:
+        return "常规MCP"
+
+    meshy_markers = ("meshy", "文生3d", "图生3d", "text to 3d", "image to 3d")
+    generation_markers = ("生成", "创建模型", "文生", "图生", "create model", "generate", "to 3d")
+    edit_markers = ("材质", "节点", "修改", "优化", "shader", "roughness", "metallic", "ior")
+    scene_markers = ("场景", "灯光", "日光", "太阳", "天空", "world", "scene")
+
+    if any(k in lowered for k in meshy_markers) and any(k in lowered for k in generation_markers) and not any(
+        k in lowered for k in edit_markers
+    ):
+        return "Meshy生成"
+    if any(k in lowered for k in edit_markers):
+        return "材质编辑"
+    if any(k in lowered for k in scene_markers):
+        return "场景编辑"
+    return "常规MCP"
+
+
+def _extract_first_url(text: str) -> str:
+    m = re.search(r"https?://[^\s)>\]\"']+", text or "", flags=re.IGNORECASE)
+    return m.group(0) if m else ""
+
+
+def _parse_meshy_request(user_msg: str):
+    msg = (user_msg or "").strip()
+    lowered = msg.lower()
+    if not msg:
+        return None, None
+
+    meshy_markers = ("meshy", "文生3d", "图生3d", "text to 3d", "image to 3d")
+    generation_markers = ("生成", "创建模型", "文生", "图生", "create model", "generate", "to 3d")
+    image_markers = ("图生", "图片", "参考图", "image", "photo", "根据这张图")
+
+    if not any(k in lowered for k in meshy_markers):
+        return None, "当前是 Meshy 模式，仅支持文生3D/图生3D。请切换到 Agent 模式执行材质/场景/MCP 操作。"
+
+    url = _extract_first_url(msg)
+    if (any(k in lowered for k in image_markers)) and (not url):
+        return None, "检测到图生3D意图，但未提供图片URL。请用“图生3D（导入图片）”按钮上传本地图片。"
+    if url and any(k in lowered for k in image_markers):
+        return ("meshy_image_to_3d", {"image_url": url}), None
+
+    if not any(k in lowered for k in generation_markers):
+        return None, "当前是 Meshy 模式，仅支持模型生成请求（文生/图生）。该请求请切到 Agent 模式。"
+
+    prompt = msg.replace(url, "").strip() if url else msg
+    if not prompt:
+        prompt = "a realistic 3d model"
+    return ("meshy_text_to_3d", {"prompt": prompt, "refine": True}), None
+
+
+def _send_meshy_pipeline(user_msg: str) -> bool:
+    from . import tool_definitions
+
+    state = _get_state()
+    parsed, reject = _parse_meshy_request(user_msg)
+    if parsed is None:
+        state.is_processing = False
+        state.last_exec_status = "error"
+        _add_message("system", f"❌ Meshy 模式: {reject}")
+        return False
+
+    tool_name, arguments = parsed
+    state.is_processing = True
+    state.last_exec_mode = "meshy"
+    state.last_route_hint = "Meshy生成"
+    _on_tool_call(tool_name, arguments)
+    result = tool_definitions.execute_tool(tool_name, arguments)
+
+    if result.get("success") and result.get("result") == "NEEDS_PERMISSION_CONFIRMATION":
+        _on_permission_request(
+            result.get("tool_name") or tool_name,
+            result.get("arguments") or arguments,
+            result.get("risk", "high"),
+            result.get("reason", "需要确认"),
+        )
+        return True
+
+    if result.get("success"):
+        msg = result.get("result")
+        if not isinstance(msg, str):
+            msg = json.dumps(msg, ensure_ascii=False)
+        _add_message("assistant", msg)
+        state.last_exec_status = "ok"
+    else:
+        err = result.get("error", "Meshy 调用失败")
+        _add_message("system", f"❌ Meshy 模式错误: {err}")
+        state.last_exec_status = "error"
+
+    state.is_processing = False
+    return bool(result.get("success"))
+
+
 def _send_message_with_mode(user_msg: str, mode: str):
+    prefs = get_preferences()
+    if getattr(prefs, "conversation_mode", "llm_agent") == "meshy_pipeline":
+        return _send_meshy_pipeline(user_msg)
     agent = get_agent(mode_override=mode)
     if agent is None:
         return False
@@ -329,8 +475,12 @@ def _draw_health_badge(layout, state: AgentState):
     try:
         prefs = get_preferences()
         layout.label(text=f"界面主题: {_theme_hint(prefs)}", icon="COLOR")
+        cmode = getattr(prefs, "conversation_mode", "llm_agent")
+        layout.label(text=f"对话通道: {'Meshy' if cmode == 'meshy_pipeline' else 'Agent'}", icon="INFO")
     except Exception:
         pass
+    layout.label(text=f"本轮路由判定: {state.last_route_hint or '-'}", icon="OUTLINER")
+    layout.label(text=f"最近卡住原因: {state.last_stall_reason or '-'}", icon="INFO")
     if int(getattr(state, "pseudo_fallback_hits", 0)) > 0:
         layout.label(text=f"伪调用兜底命中: {int(state.pseudo_fallback_hits)} 次", icon="INFO")
 
@@ -395,6 +545,15 @@ def _scaled_container(layout, prefs):
     return container
 
 
+def _draw_mode_switch(layout, prefs):
+    row = layout.row(align=True)
+    if hasattr(prefs, "conversation_mode"):
+        row.prop(prefs, "conversation_mode", expand=True)
+    else:
+        # 兼容热更新/旧RNA缓存：属性未注册时降级显示，避免整块UI绘制失败
+        row.label(text="Agent | Meshy（请重载插件）", icon="INFO")
+
+
 def _execute_in_main_thread(func, *args):
     """在 Blender 主线程执行函数"""
     import queue
@@ -431,7 +590,72 @@ def _add_message(role: str, content: str, is_code: bool = False):
         area.tag_redraw()
 
 
+def push_system_notice(content: str):
+    """供外部模块（如 Meshy 回调）安全推送系统消息到聊天面板。"""
+    try:
+        _add_message("system", content)
+    except Exception:
+        pass
+
+
+def _schedule_processing_timeout_check(started_at: float, timeout_sec: float = 12.0):
+    """继续执行提示的兜底超时：长时间无后续回调时自动结束等待态。"""
+
+    def _check():
+        try:
+            state = _get_state()
+            if not state.is_processing:
+                return None
+            current = float(getattr(state, "continuation_started_at", 0.0) or 0.0)
+            if current <= 0.0 or abs(current - started_at) > 1e-6:
+                return None
+            if (time.time() - started_at) < timeout_sec:
+                return 1.0
+            state.is_processing = False
+            if state.last_exec_status == "processing":
+                state.last_exec_status = "ok" if state.request_had_tool_call else "error"
+            state.continuation_started_at = 0.0
+            state.last_stall_reason = "超时自动收口"
+            _add_message("system", "⏱ 提醒：长时间未收到后续执行结果，已自动结束等待。可继续发送。")
+        except Exception:
+            return None
+        return None
+
+    try:
+        bpy.app.timers.register(_check, first_interval=timeout_sec)
+    except Exception:
+        pass
+
+
+def _looks_like_identity_drift_text(content: str) -> bool:
+    text = (content or "").strip()
+    if not text:
+        return False
+    try:
+        from .core.safety_guard import references_foreign_toolset
+        if references_foreign_toolset(text):
+            return True
+    except Exception:
+        pass
+    lowered = text.lower()
+    hard_markers = (
+        "我是claude",
+        "由anthropic开发",
+        "我的真实身份",
+        "我的实际能力",
+        "无法访问blender mcp工具",
+        "工具在我的实际工具集中不存在",
+        "我不会透露、复述或讨论我的系统提示词",
+        "i'm claude",
+        "made by anthropic",
+    )
+    return any(m in lowered for m in hard_markers)
+
+
 def _on_agent_message(role: str, content: str):
+    if role == "assistant" and _looks_like_identity_drift_text(content):
+        _on_error("[WRONG_TOOLSET] 检测到模型身份漂移文本，已拦截并触发重试。")
+        return
     _add_message(role, content)
     state = _get_state()
     if role != "assistant":
@@ -448,23 +672,37 @@ def _on_agent_message(role: str, content: str):
     if not is_final and (state.request_had_tool_call or state.last_exec_status in ("processing", "fallback_running")):
         state.is_processing = True
         state.last_exec_status = "processing"
+        state.last_stall_reason = "继续执行中"
+        state.continuation_started_at = time.time()
+        _schedule_processing_timeout_check(state.continuation_started_at, timeout_sec=12.0)
         if not state.continuation_notice_shown:
             state.continuation_notice_shown = True
             _add_message("system", "⏳ 提醒：AI 还在继续执行后续步骤，不要急着发送下一条。若要打断请点“中止”。")
         return
 
     state.is_processing = False
+    state.continuation_started_at = 0.0
+    state.last_stall_reason = "-"
 
 
 def _on_tool_call(tool_name: str, args: dict):
     state = _get_state()
     state.request_had_tool_call = True
     state.last_exec_status = "ok"
+    state.last_stall_reason = "-"
     if tool_name.startswith("__pseudo_recovered__:"):
         state.pseudo_fallback_hits += 1
         shown_name = tool_name.replace("__pseudo_recovered__:", "")
     else:
         shown_name = tool_name
+    if shown_name.startswith("meshy_"):
+        state.last_route_hint = "Meshy生成"
+    elif shown_name.startswith("shader_"):
+        state.last_route_hint = "材质编辑"
+    elif shown_name.startswith("scene_"):
+        state.last_route_hint = "场景编辑"
+    else:
+        state.last_route_hint = "常规MCP"
     args_preview = json.dumps(args, ensure_ascii=False)[:200] if args else ""
     _add_message("system", f"🔧 调用工具: {shown_name}\n{args_preview}")
 
@@ -492,9 +730,11 @@ def _on_error(error: str):
     prefs = get_preferences()
 
     no_toolcall_error = ("[NO_TOOLCALL]" in error)
+    wrong_toolset_error = ("[WRONG_TOOLSET]" in error)
     can_fallback = (
-        bool(getattr(prefs, "auto_fallback_on_no_toolcall", True))
-        and no_toolcall_error
+        (state.last_exec_mode != "meshy")
+        and bool(getattr(prefs, "auto_fallback_on_no_toolcall", True))
+        and (no_toolcall_error or wrong_toolset_error)
         and (not state.fallback_attempted)
         and bool(state.last_user_message)
     )
@@ -502,17 +742,26 @@ def _on_error(error: str):
         retry_mode = _fallback_mode(state.last_exec_mode or prefs.agent_mode)
         state.fallback_attempted = True
         state.last_exec_status = "fallback_running"
-        _add_message("system", f"♻️ 当前模式未触发工具调用，自动切换到 {retry_mode} 模式重试一次。")
+        state.last_stall_reason = "模式回退重试"
+        if wrong_toolset_error:
+            _add_message("system", f"♻️ 检测到模型工具集漂移，自动切换到 {retry_mode} 模式重试一次。")
+        else:
+            _add_message("system", f"♻️ 当前模式未触发工具调用，自动切换到 {retry_mode} 模式重试一次。")
         if _send_message_with_mode(state.last_user_message, retry_mode):
             return
         _add_message("system", "❌ 自动回退失败：无法创建回退 Agent 实例。")
 
     _add_message("system", f"❌ 错误: {error}")
     state.is_processing = False
+    state.continuation_started_at = 0.0
     if no_toolcall_error:
         state.last_exec_status = "no_toolcall"
+        state.last_stall_reason = "无工具调用"
+    elif wrong_toolset_error:
+        state.last_stall_reason = "工具集漂移"
     else:
         state.last_exec_status = "error_after_toolcall" if state.request_had_tool_call else "error"
+        state.last_stall_reason = "一般错误"
 
 
 def _on_permission_request(tool_name: str, args: dict, risk: str, reason: str):
@@ -522,6 +771,7 @@ def _on_permission_request(tool_name: str, args: dict, risk: str, reason: str):
     state.pending_permission_risk = risk or "high"
     state.pending_permission_reason = reason or "该操作需要授权"
     state.is_processing = False
+    state.last_stall_reason = "权限等待"
     _add_message(
         "system",
         f"🔐 需要权限确认：{state.pending_permission_tool}（风险: {state.pending_permission_risk}）\n{state.pending_permission_reason}\n请点击“允许一次”或“拒绝”。",
@@ -608,9 +858,15 @@ class AGENT_OT_SendMessage(Operator):
             return {"CANCELLED"}
 
         prefs = get_preferences()
-        if get_agent(mode_override=prefs.agent_mode) is None:
-            self.report({"ERROR"}, "请先在插件设置中配置 API Key")
-            return {"CANCELLED"}
+        mode_kind = getattr(prefs, "conversation_mode", "llm_agent")
+        if mode_kind == "llm_agent":
+            if get_agent(mode_override=prefs.agent_mode) is None:
+                self.report({"ERROR"}, "请先在插件设置中配置 API Key")
+                return {"CANCELLED"}
+        else:
+            if not getattr(prefs, "meshy_api_key", ""):
+                self.report({"ERROR"}, "请先在插件设置中配置 Meshy API Key")
+                return {"CANCELLED"}
 
         user_msg = state.input_text.strip()
         _add_message("user", user_msg)
@@ -620,9 +876,12 @@ class AGENT_OT_SendMessage(Operator):
         state.request_had_tool_call = False
         state.fallback_attempted = False
         state.last_exec_status = "processing"
-        state.last_exec_mode = prefs.agent_mode
+        state.last_exec_mode = "meshy" if mode_kind == "meshy_pipeline" else prefs.agent_mode
+        state.last_route_hint = "Meshy生成" if mode_kind == "meshy_pipeline" else _infer_route_hint(user_msg)
         state.pseudo_fallback_hits = 0
         state.continuation_notice_shown = False
+        state.continuation_started_at = 0.0
+        state.last_stall_reason = "-"
         _send_message_with_mode(user_msg, prefs.agent_mode)
 
         return {"FINISHED"}
@@ -644,6 +903,7 @@ class AGENT_OT_StopProcessing(Operator):
 
         state.is_processing = False
         state.last_exec_status = "idle"
+        state.last_stall_reason = "用户中止"
         _add_message("system", "⏹️ 已请求中止当前任务。")
         self.report({"INFO"}, "已发送中止请求")
         return {"FINISHED"}
@@ -699,18 +959,37 @@ class AGENT_OT_ConfirmPermission(Operator):
                 self.report({"ERROR"}, f"授权失败: {e}")
                 return {"CANCELLED"}
 
-            _add_message("system", f"✅ 已授权一次：{tool_name}。Agent 将继续执行。")
-            resume_mode = state.last_exec_mode or get_preferences().agent_mode
-            agent = get_agent(mode_override=resume_mode)
-            if agent:
-                state.is_processing = True
-                state.last_exec_status = "processing"
-                resume_prompt = (
-                    f"权限已批准。请继续完成刚才任务。"
-                    f"你对工具 {tool_name} 使用参数 {args_text} 已获得一次性授权，"
-                    "请立即调用 MCP 工具并继续后续步骤。"
-                )
-                agent.send_message(resume_prompt)
+            if state.last_exec_mode == "meshy":
+                _add_message("system", f"✅ 已授权一次：{tool_name}。Meshy 流程继续执行。")
+                try:
+                    from . import tool_definitions
+                    state.is_processing = True
+                    state.last_exec_status = "processing"
+                    result = tool_definitions.execute_tool(tool_name, args)
+                    if result.get("success"):
+                        msg = result.get("result")
+                        if not isinstance(msg, str):
+                            msg = json.dumps(msg, ensure_ascii=False)
+                        _add_message("assistant", msg)
+                        state.last_exec_status = "ok"
+                    else:
+                        _add_message("system", f"❌ Meshy 模式错误: {result.get('error', '执行失败')}")
+                        state.last_exec_status = "error"
+                finally:
+                    state.is_processing = False
+            else:
+                _add_message("system", f"✅ 已授权一次：{tool_name}。Agent 将继续执行。")
+                resume_mode = state.last_exec_mode or get_preferences().agent_mode
+                agent = get_agent(mode_override=resume_mode)
+                if agent:
+                    state.is_processing = True
+                    state.last_exec_status = "processing"
+                    resume_prompt = (
+                        f"权限已批准。请继续完成刚才任务。"
+                        f"你对工具 {tool_name} 使用参数 {args_text} 已获得一次性授权，"
+                        "请立即调用 MCP 工具并继续后续步骤。"
+                    )
+                    agent.send_message(resume_prompt)
         else:
             _add_message("system", f"🚫 已拒绝授权：{tool_name or '未知工具'}")
 
@@ -873,19 +1152,106 @@ class AGENT_OT_SendTodoToAgent(Operator):
                 self.report({"WARNING"}, "Agent 正在处理中...")
                 return {"CANCELLED"}
             prefs = get_preferences()
-            if get_agent(mode_override=prefs.agent_mode) is None:
-                self.report({"ERROR"}, "请先配置 API Key")
-                return {"CANCELLED"}
+            mode_kind = getattr(prefs, "conversation_mode", "llm_agent")
+            if mode_kind == "llm_agent":
+                if get_agent(mode_override=prefs.agent_mode) is None:
+                    self.report({"ERROR"}, "请先配置 API Key")
+                    return {"CANCELLED"}
+            else:
+                if not getattr(prefs, "meshy_api_key", ""):
+                    self.report({"ERROR"}, "请先配置 Meshy API Key")
+                    return {"CANCELLED"}
             msg = f"请帮我完成这个任务：{todo.content}"
             _add_message("user", msg)
             state.last_user_message = msg
             state.request_had_tool_call = False
             state.fallback_attempted = False
             state.last_exec_status = "processing"
-            state.last_exec_mode = prefs.agent_mode
+            state.last_exec_mode = "meshy" if mode_kind == "meshy_pipeline" else prefs.agent_mode
+            state.last_route_hint = "Meshy生成" if mode_kind == "meshy_pipeline" else _infer_route_hint(msg)
             state.pseudo_fallback_hits = 0
             state.continuation_notice_shown = False
+            state.continuation_started_at = 0.0
+            state.last_stall_reason = "-"
             _send_message_with_mode(msg, prefs.agent_mode)
+        return {"FINISHED"}
+
+
+class AGENT_OT_MeshyImageTo3DUpload(Operator):
+    bl_idname = "agent.meshy_image_to_3d_upload"
+    bl_label = "图生3D（导入图片）"
+    bl_description = "选择本地图片并直接调用 Meshy 图生3D"
+
+    filepath: StringProperty(subtype="FILE_PATH")
+
+    def invoke(self, context, event):
+        context.window_manager.fileselect_add(self)
+        return {"RUNNING_MODAL"}
+
+    def execute(self, context):
+        state = _get_state()
+        if state.is_processing:
+            self.report({"WARNING"}, "Agent 正在处理中，请稍后")
+            return {"CANCELLED"}
+
+        if not self.filepath or not os.path.isfile(self.filepath):
+            self.report({"ERROR"}, "请选择有效图片文件")
+            return {"CANCELLED"}
+
+        try:
+            with open(self.filepath, "rb") as f:
+                raw = f.read()
+            if not raw:
+                self.report({"ERROR"}, "图片文件为空")
+                return {"CANCELLED"}
+
+            mime, _ = mimetypes.guess_type(self.filepath)
+            if not mime or not mime.startswith("image/"):
+                ext = os.path.splitext(self.filepath)[1].lower()
+                mime = {
+                    ".jpg": "image/jpeg",
+                    ".jpeg": "image/jpeg",
+                    ".png": "image/png",
+                    ".webp": "image/webp",
+                    ".gif": "image/gif",
+                    ".bmp": "image/bmp",
+                }.get(ext, "image/png")
+
+            b64 = base64.b64encode(raw).decode("ascii")
+            data_uri = f"data:{mime};base64,{b64}"
+
+            _add_message("user", f"🖼️ 图生3D上传图片: {os.path.basename(self.filepath)}")
+            state.is_processing = True
+            state.last_exec_status = "processing"
+            state.last_exec_mode = "meshy"
+            state.continuation_notice_shown = False
+            _on_tool_call("meshy_image_to_3d", {"image_url": f"data-uri://local-upload ({len(raw)} bytes)"})
+
+            from . import tool_definitions
+            # 这里已经在 Blender 主线程中，直接调用可避免 30s 队列等待超时
+            result = tool_definitions.execute_tool(
+                "meshy_image_to_3d",
+                {"image_url": data_uri},
+            )
+
+            if result.get("success"):
+                msg = result.get("result")
+                if not isinstance(msg, str):
+                    msg = json.dumps(msg, ensure_ascii=False)
+                _add_message("assistant", msg)
+                state.last_exec_status = "ok"
+                self.report({"INFO"}, "已创建 Meshy 图生3D 任务")
+            else:
+                err = result.get("error", "调用 Meshy 图生3D 失败")
+                _on_error(f"Meshy 图生3D失败: {err}")
+                self.report({"ERROR"}, str(err)[:120])
+        except Exception as e:
+            _on_error(f"图生3D上传失败: {e}")
+            self.report({"ERROR"}, f"上传失败: {e}")
+            return {"CANCELLED"}
+        finally:
+            state.is_processing = False
+
         return {"FINISHED"}
 
 
@@ -903,14 +1269,18 @@ class AGENT_OT_OpenChat(Operator):
         prefs = get_preferences()
         ui = _scaled_container(layout, prefs)
 
-        if not prefs.api_key:
+        mode_kind = getattr(prefs, "conversation_mode", "llm_agent")
+        missing_key = (not prefs.api_key) if mode_kind == "llm_agent" else (not getattr(prefs, "meshy_api_key", ""))
+        if missing_key:
             box = ui.box()
-            box.label(text="⚠️ 请先配置 API Key", icon='ERROR')
+            tip = "⚠️ 请先配置 API Key" if mode_kind == "llm_agent" else "⚠️ 请先配置 Meshy API Key"
+            box.label(text=tip, icon='ERROR')
             box.operator("agent.open_settings", text="打开设置", icon='PREFERENCES')
             return
 
         header = ui.box()
         header.label(text=f"{_theme_mark(prefs)} Blender Agent", icon='OUTLINER_OB_LIGHT')
+        _draw_mode_switch(header, prefs)
         _draw_health_badge(header, state)
 
         box = ui.box()
@@ -974,6 +1344,7 @@ class AGENT_OT_OpenChat(Operator):
         if _is_mocha(prefs):
             _section_title(actions, "操作", icon="TOOL_SETTINGS")
         _draw_quick_actions(actions, popup=True)
+        actions.operator("agent.meshy_image_to_3d_upload", text="图生3D（导入图片）", icon="IMAGE_DATA")
 
     def invoke(self, context, event):
         prefs = get_preferences()
@@ -1003,9 +1374,12 @@ class AGENT_PT_MainPanel(Panel):
         prefs = get_preferences()
         ui = _scaled_container(layout, prefs)
 
-        if not prefs.api_key:
+        mode_kind = getattr(prefs, "conversation_mode", "llm_agent")
+        missing_key = (not prefs.api_key) if mode_kind == "llm_agent" else (not getattr(prefs, "meshy_api_key", ""))
+        if missing_key:
             box = ui.box()
-            box.label(text="⚠️ 请先配置 API Key", icon='ERROR')
+            tip = "⚠️ 请先配置 API Key" if mode_kind == "llm_agent" else "⚠️ 请先配置 Meshy API Key"
+            box.label(text=tip, icon='ERROR')
             box.operator("agent.open_settings", text="打开设置", icon='PREFERENCES')
             return
 
@@ -1014,6 +1388,7 @@ class AGENT_PT_MainPanel(Panel):
 
         header = ui.box()
         header.label(text=f"{_theme_mark(prefs)} Blender Agent", icon='OUTLINER_OB_LIGHT')
+        _draw_mode_switch(header, prefs)
         _draw_health_badge(header, state)
 
         box = ui.box()
@@ -1074,6 +1449,7 @@ class AGENT_PT_MainPanel(Panel):
         if _is_mocha(prefs):
             _section_title(actions, "操作", icon="TOOL_SETTINGS")
         _draw_quick_actions(actions, popup=False)
+        actions.operator("agent.meshy_image_to_3d_upload", text="图生3D（导入图片）", icon="IMAGE_DATA")
 
 
 class AGENT_OT_ViewPerformanceReport(Operator):
@@ -1226,6 +1602,7 @@ classes = [
     AGENT_OT_RemoveTodo,
     AGENT_OT_ToggleTodo,
     AGENT_OT_SendTodoToAgent,
+    AGENT_OT_MeshyImageTo3DUpload,
     AGENT_OT_OpenChat,
     AGENT_OT_ViewPerformanceReport,
     AGENT_OT_ExportPerformanceReport,

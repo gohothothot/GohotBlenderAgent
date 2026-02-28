@@ -72,14 +72,20 @@ def route(message: str) -> Route:
     """根据用户消息路由到合适的意图和领域"""
     msg = message.lower()
 
-    # 关键词匹配
-    intent = "general"
-    domain = "general"
-    for keyword, (kw_intent, kw_domain) in _KEYWORD_MAP.items():
-        if keyword in msg:
-            intent = kw_intent
-            domain = kw_domain
-            break
+    # 优先识别 Meshy/3D 生成意图，避免被通用“生成/创建”关键词提前截获
+    meshy_markers = ("meshy", "文生3d", "图生3d", "ai生成", "text to 3d", "image to 3d")
+    if any(k in msg for k in meshy_markers):
+        intent = "generate_3d"
+        domain = "meshy"
+    else:
+        # 关键词匹配
+        intent = "general"
+        domain = "general"
+        for keyword, (kw_intent, kw_domain) in _KEYWORD_MAP.items():
+            if keyword in msg:
+                intent = kw_intent
+                domain = kw_domain
+                break
 
     # 复杂度判断
     complex_score = sum(1 for kw in _COMPLEX_KEYWORDS if kw in msg)

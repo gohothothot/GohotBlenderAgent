@@ -1100,6 +1100,153 @@ def _ensure_meshy_callbacks(api):
     api.on_task_complete = _on_meshy_task_complete
 
 
+def _postprocess_meshy_imported_objects(
+    object_names: list,
+    preset: str = "realistic",
+    strength: str = "medium",
+) -> dict:
+    """
+    对 Meshy 导入对象做轻量稳定后处理：
+    - 确保对象有可编辑材质
+    - 适度降低 Roughness、提升高光，方便继续二次编辑
+    """
+    processed = []
+    details = []
+
+    def _read_socket(bsdf_node, socket_name):
+        sock = bsdf_node.inputs.get(socket_name)
+        if sock is None:
+            return None
+        try:
+            return float(sock.default_value)
+        except Exception:
+            return None
+    try:
+        for obj_name in object_names or []:
+            obj = bpy.data.objects.get(obj_name)
+            if not obj or obj.type != "MESH" or not hasattr(obj.data, "materials"):
+                continue
+
+            mat = obj.data.materials[0] if obj.data.materials else None
+            if mat is None:
+                mat = bpy.data.materials.new(name=f"{obj.name}_MeshyPost")
+                mat.use_nodes = True
+                if obj.data.materials:
+                    obj.data.materials[0] = mat
+                else:
+                    obj.data.materials.append(mat)
+
+            mat.use_nodes = True
+            nt = mat.node_tree
+            if not nt:
+                continue
+            nodes = nt.nodes
+
+            bsdf = None
+            for n in nodes:
+                if n.type == "BSDF_PRINCIPLED":
+                    bsdf = n
+                    break
+            if bsdf is None:
+                continue
+
+            before = {
+                "roughness": _read_socket(bsdf, "Roughness"),
+                "specular_ior_level": _read_socket(bsdf, "Specular IOR Level"),
+                "specular": _read_socket(bsdf, "Specular"),
+                "metallic": _read_socket(bsdf, "Metallic"),
+                "ior": _read_socket(bsdf, "IOR"),
+                "transmission_weight": _read_socket(bsdf, "Transmission Weight"),
+                "transmission": _read_socket(bsdf, "Transmission"),
+            }
+
+            style = (preset or "realistic").lower()
+            strength_key = (strength or "medium").lower()
+            factor = {"light": 0.6, "medium": 1.0, "strong": 1.4}.get(strength_key, 1.0)
+
+            if style == "toon":
+                if "Roughness" in bsdf.inputs:
+                    bsdf.inputs["Roughness"].default_value = max(
+                        float(bsdf.inputs["Roughness"].default_value),
+                        min(0.9, 0.45 + 0.10 * factor),
+                    )
+                if "Specular IOR Level" in bsdf.inputs:
+                    bsdf.inputs["Specular IOR Level"].default_value = min(
+                        float(bsdf.inputs["Specular IOR Level"].default_value),
+                        max(0.08, 0.30 - 0.07 * factor),
+                    )
+                elif "Specular" in bsdf.inputs:
+                    bsdf.inputs["Specular"].default_value = min(
+                        float(bsdf.inputs["Specular"].default_value),
+                        max(0.08, 0.28 - 0.08 * factor),
+                    )
+            elif style == "metal":
+                if "Metallic" in bsdf.inputs:
+                    bsdf.inputs["Metallic"].default_value = max(
+                        float(bsdf.inputs["Metallic"].default_value),
+                        min(1.0, 0.75 + 0.15 * factor),
+                    )
+                if "Roughness" in bsdf.inputs:
+                    bsdf.inputs["Roughness"].default_value = min(
+                        float(bsdf.inputs["Roughness"].default_value),
+                        max(0.05, 0.24 - 0.06 * factor),
+                    )
+                if "Specular IOR Level" in bsdf.inputs:
+                    bsdf.inputs["Specular IOR Level"].default_value = max(
+                        float(bsdf.inputs["Specular IOR Level"].default_value),
+                        min(1.0, 0.68 + 0.10 * factor),
+                    )
+            elif style == "glass":
+                if "Roughness" in bsdf.inputs:
+                    bsdf.inputs["Roughness"].default_value = min(
+                        float(bsdf.inputs["Roughness"].default_value),
+                        max(0.01, 0.06 - 0.02 * factor),
+                    )
+                if "IOR" in bsdf.inputs:
+                    bsdf.inputs["IOR"].default_value = min(1.55, 1.40 + 0.06 * factor)
+                if "Transmission Weight" in bsdf.inputs:
+                    bsdf.inputs["Transmission Weight"].default_value = min(1.0, 0.85 + 0.10 * factor)
+                elif "Transmission" in bsdf.inputs:
+                    bsdf.inputs["Transmission"].default_value = min(1.0, 0.85 + 0.10 * factor)
+            else:  # realistic
+                if "Roughness" in bsdf.inputs:
+                    bsdf.inputs["Roughness"].default_value = min(
+                        float(bsdf.inputs["Roughness"].default_value),
+                        max(0.12, 0.34 - 0.08 * factor),
+                    )
+                if "Specular IOR Level" in bsdf.inputs:
+                    bsdf.inputs["Specular IOR Level"].default_value = max(
+                        float(bsdf.inputs["Specular IOR Level"].default_value),
+                        min(1.0, 0.62 + 0.12 * factor),
+                    )
+                elif "Specular" in bsdf.inputs:
+                    bsdf.inputs["Specular"].default_value = max(
+                        float(bsdf.inputs["Specular"].default_value),
+                        min(1.0, 0.48 + 0.14 * factor),
+                    )
+
+            processed.append(obj.name)
+            after = {
+                "roughness": _read_socket(bsdf, "Roughness"),
+                "specular_ior_level": _read_socket(bsdf, "Specular IOR Level"),
+                "specular": _read_socket(bsdf, "Specular"),
+                "metallic": _read_socket(bsdf, "Metallic"),
+                "ior": _read_socket(bsdf, "IOR"),
+                "transmission_weight": _read_socket(bsdf, "Transmission Weight"),
+                "transmission": _read_socket(bsdf, "Transmission"),
+            }
+            details.append({
+                "object": obj.name,
+                "material": mat.name,
+                "before": before,
+                "after": after,
+            })
+    except Exception as e:
+        return {"success": False, "error": str(e), "processed": processed, "details": details}
+
+    return {"success": True, "processed": processed, "details": details}
+
+
 def _on_meshy_task_complete(task):
     from . import meshy_api
 
@@ -1142,7 +1289,56 @@ def _on_meshy_task_complete(task):
             model_name = f"Meshy_Image3D_{task.task_id[:8]}"
         else:
             model_name = f"Meshy_{task.task_id[:8]}"
-        meshy_api.download_and_import_model(glb_url, model_name, texture_urls)
+        import_result = meshy_api.download_and_import_model(glb_url, model_name, texture_urls)
+        try:
+            if import_result.get("success"):
+                active_obj = import_result.get("active_object", "")
+                active_polygons = int(import_result.get("active_object_polygons") or 0)
+                obj_count = len(import_result.get("objects") or [])
+                note = f"📦 Meshy 导入完成：{model_name}（对象 {obj_count} 个）"
+                if active_obj:
+                    note += f"，当前激活对象：{active_obj}"
+                    if active_polygons > 0:
+                        note += f"（面数 {active_polygons}）"
+                from . import chat_ui
+                if hasattr(chat_ui, "push_system_notice"):
+                    chat_ui.push_system_notice(note)
+        except Exception:
+            pass
+        try:
+            prefs = _get_addon_prefs()
+            if (
+                import_result.get("success")
+                and prefs
+                and bool(getattr(prefs, "meshy_auto_postprocess", True))
+            ):
+                obj_names = import_result.get("objects") or []
+                preset = getattr(prefs, "meshy_postprocess_preset", "realistic")
+                strength = getattr(prefs, "meshy_postprocess_strength", "medium")
+                post = _postprocess_meshy_imported_objects(
+                    obj_names,
+                    preset=preset,
+                    strength=strength,
+                )
+                if not post.get("success"):
+                    print(f"[Meshy] Postprocess failed: {post.get('error')}")
+                else:
+                    processed_count = len(post.get("processed") or [])
+                    print(f"[Meshy] Postprocess preset={preset}, strength={strength}, objects={processed_count}")
+                    try:
+                        from . import action_log
+                        action_log.log_metric("meshy_postprocess", {
+                            "preset": preset,
+                            "strength": strength,
+                            "processed_count": processed_count,
+                            "details": post.get("details") or [],
+                            "task_id": task.task_id,
+                            "task_type": task_type,
+                        })
+                    except Exception:
+                        pass
+        except Exception as e:
+            print(f"[Meshy] Postprocess error: {e}")
 
     _meshy_tasks.pop(task.task_id, None)
 

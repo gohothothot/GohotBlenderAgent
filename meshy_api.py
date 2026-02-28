@@ -194,13 +194,36 @@ def download_and_import_model(glb_url: str, model_name: str = "MeshyModel", text
         if imported_objects:
             for obj in imported_objects:
                 obj.select_set(True)
-            bpy.context.view_layer.objects.active = imported_objects[0]
+
+            # 优先选择“主网格对象”作为 active，避免后续材质编辑命中空节点/辅助对象
+            mesh_candidates = [obj for obj in imported_objects if obj.type == "MESH"]
+            active_obj = None
+            if mesh_candidates:
+                def _poly_count(o):
+                    try:
+                        return len(o.data.polygons) if getattr(o, "data", None) else 0
+                    except Exception:
+                        return 0
+                active_obj = max(mesh_candidates, key=_poly_count)
+            else:
+                active_obj = imported_objects[0]
+
+            bpy.context.view_layer.objects.active = active_obj
+
+        active_polygons = 0
+        try:
+            if imported_objects and active_obj and getattr(active_obj, "data", None) and hasattr(active_obj.data, "polygons"):
+                active_polygons = len(active_obj.data.polygons)
+        except Exception:
+            active_polygons = 0
 
         return {
             "success": True,
             "result": f"模型已导入: {model_name}，共 {len(imported_objects)} 个对象",
             "file_path": file_path,
             "objects": [obj.name for obj in imported_objects],
+            "active_object": active_obj.name if imported_objects else "",
+            "active_object_polygons": active_polygons,
         }
 
     except Exception as e:

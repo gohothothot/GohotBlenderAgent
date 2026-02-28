@@ -28,7 +28,7 @@ from .llm import UnifiedLLM, LLMConfig, LLMResponse
 from .router import route as route_message
 from .tools import (
     get_all_tools,
-    get_tools_for_intent,
+    get_tools_for_llm,
     execute_tool,
     truncate_result,
 )
@@ -141,7 +141,7 @@ class StructuredAgent:
     def _get_tools(self, intent: str = "general") -> list:
         if not self._tools:
             self._load_tools()
-        tools = get_tools_for_intent(intent)
+        tools = get_tools_for_llm(intent)
         if not tools:
             tools = self._tools
         _log(f"Tools for intent '{intent}': {len(tools)}")
