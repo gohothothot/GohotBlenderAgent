@@ -8,7 +8,7 @@ Blender Agent Tools - 工具定义
 import bpy
 import json
 from typing import Any
-from .permission_guard import evaluate_tool_permission
+from .core.tool_guard import precheck_tool_execution
 
 # ========== 工具定义 ==========
 # Claude Tool Use 格式：每个工具有 name, description, input_schema
@@ -1019,6 +1019,52 @@ TOOLS = [
             "required": ["index"]
         }
     },
+    # ----- Plan 模式工具 -----
+    {
+        "name": "create_plan",
+        "description": "创建结构化执行计划（用于复杂任务先规划后执行）",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "计划标题"},
+                "overview": {"type": "string", "description": "计划概览"},
+                "steps": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": "步骤列表，每项可包含 id/title/description/tools/depends_on"
+                },
+                "architecture": {"type": "object", "description": "目标架构图数据"},
+                "session_id": {"type": "string", "description": "会话ID（可选）"}
+            },
+            "required": ["title", "steps"]
+        }
+    },
+    {
+        "name": "update_plan_step",
+        "description": "更新计划步骤状态（running/done/error）",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "step_id": {"type": "string", "description": "步骤ID"},
+                "status": {"type": "string", "description": "步骤状态：running|done|error"},
+                "result_summary": {"type": "string", "description": "步骤结果摘要"},
+                "session_id": {"type": "string", "description": "会话ID（可选）"}
+            },
+            "required": ["step_id", "status"]
+        }
+    },
+    {
+        "name": "ask_question",
+        "description": "在规划阶段向用户提出澄清问题",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "questions": {"type": "array", "items": {"type": "object"}, "description": "问题列表"},
+                "session_id": {"type": "string", "description": "会话ID（可选）"}
+            },
+            "required": ["questions"]
+        }
+    },
     # ----- 文件系统工具 -----
     {
         "name": "file_read",
@@ -1506,22 +1552,9 @@ def execute_tool(tool_name: str, arguments: dict) -> dict:
     返回格式: {"success": bool, "result": Any, "error": str|None}
     """
     try:
-        permission = evaluate_tool_permission(tool_name, arguments or {})
-        if not permission.get("allowed", True):
-            return {
-                "success": False,
-                "result": None,
-                "error": f"权限拦截: {permission.get('reason', '未授权')}",
-            }
-        if permission.get("requires_confirmation"):
-            return {
-                "success": True,
-                "result": "NEEDS_PERMISSION_CONFIRMATION",
-                "tool_name": tool_name,
-                "arguments": arguments or {},
-                "risk": permission.get("risk", "high"),
-                "reason": permission.get("reason", "需要确认"),
-            }
+        guarded = precheck_tool_execution(tool_name, arguments or {})
+        if guarded is not None:
+            return guarded
 
         if tool_name == "list_objects":
             return _list_objects()
@@ -1561,6 +1594,12 @@ def execute_tool(tool_name: str, arguments: dict) -> dict:
             return _get_todo_list()
         elif tool_name == "complete_todo":
             return _complete_todo(**arguments)
+        elif tool_name == "create_plan":
+            return _create_plan(**arguments)
+        elif tool_name == "update_plan_step":
+            return _update_plan_step(**arguments)
+        elif tool_name == "ask_question":
+            return _ask_question(**arguments)
         elif tool_name.startswith("anim_"):
             from . import animation_tools
             return animation_tools.execute_anim_tool(tool_name, arguments)
@@ -1871,5 +1910,60 @@ def _complete_todo(index: int) -> dict:
             content = state.todos[index].content
             return {"success": True, "result": f"已完成: {content}", "error": None}
         return {"success": False, "result": None, "error": f"无效索引: {index}"}
+    except Exception as e:
+        return {"success": False, "result": None, "error": str(e)}
+
+
+def _plan_session_id(session_id: str = "") -> str:
+    if session_id:
+        return session_id
+    try:
+        import bpy as _bpy
+        scene_name = (_bpy.context.scene.name or "default").strip()
+        return f"scene_{scene_name}"
+    except Exception:
+        return "default"
+
+
+def _create_plan(title: str, steps: list, overview: str = "", architecture: dict = None, session_id: str = "") -> dict:
+    try:
+        from .context.plan_manager import get_plan_manager
+        sid = _plan_session_id(session_id)
+        manager = get_plan_manager()
+        plan = manager.create_plan(sid, {
+            "title": title,
+            "overview": overview or "",
+            "steps": steps or [],
+            "architecture": architecture or {},
+        })
+        return {"success": True, "result": plan, "error": None}
+    except Exception as e:
+        return {"success": False, "result": None, "error": str(e)}
+
+
+def _update_plan_step(step_id: str, status: str, result_summary: str = "", session_id: str = "") -> dict:
+    try:
+        from .context.plan_manager import get_plan_manager
+        sid = _plan_session_id(session_id)
+        manager = get_plan_manager()
+        plan = manager.update_step(sid, step_id, status, result_summary or "")
+        if not plan:
+            return {"success": False, "result": None, "error": "未找到可更新的计划"}
+        return {"success": True, "result": plan, "error": None}
+    except Exception as e:
+        return {"success": False, "result": None, "error": str(e)}
+
+
+def _ask_question(questions: list, session_id: str = "") -> dict:
+    """
+    Ask-question is returned to UI layer as structured prompt payload.
+    """
+    try:
+        payload = {
+            "type": "ASK_QUESTION",
+            "session_id": _plan_session_id(session_id),
+            "questions": questions or [],
+        }
+        return {"success": True, "result": payload, "error": None}
     except Exception as e:
         return {"success": False, "result": None, "error": str(e)}

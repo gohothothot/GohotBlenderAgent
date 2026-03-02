@@ -60,7 +60,7 @@ class ValidatorAgent:
             )
             response = self._llm.chat(
                 messages=[{"role": "user", "content": content}],
-                system=AgentPrompts.VALIDATOR,
+                system=AgentPrompts.get_validator_prompt(),
             )
             return self._parse_validation(response.text)
         except Exception:

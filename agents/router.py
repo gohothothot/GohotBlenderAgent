@@ -24,7 +24,7 @@ class RouterAgent:
         try:
             response = self._llm.chat(
                 messages=[{"role": "user", "content": user_message}],
-                system=AgentPrompts.ROUTER,
+                system=AgentPrompts.get_router_prompt(),
             )
             return parse_route_from_llm(response.text)
         except Exception:

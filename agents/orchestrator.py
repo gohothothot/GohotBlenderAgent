@@ -16,13 +16,14 @@ from .router import RouterAgent
 from .planner import PlannerAgent
 from .executor import ExecutorAgent
 from .validator import ValidatorAgent
+from ..core.runtime_core import RuntimeCoreMixin
 
 
 def _log(msg: str):
     print(f"[Orchestrator] {msg}")
 
 
-class AgentOrchestrator:
+class AgentOrchestrator(RuntimeCoreMixin):
 
     def __init__(
         self,
@@ -36,6 +37,7 @@ class AgentOrchestrator:
         self._router = RouterAgent(llm=provider, use_llm=False)
         self._planner = PlannerAgent(llm=provider)
         self._executor = ExecutorAgent(llm=provider, execute_in_main_thread=execute_in_main_thread)
+        self._executor.on_tool_call = self._emit_tool_call
         self._validator = ValidatorAgent(llm=None)
         self._context = ContextManager()
 
@@ -104,6 +106,10 @@ class AgentOrchestrator:
             user_message, route.domain, route.intent,
         )
         _log(f"execute_simple done: success={result.get('success')}, result_len={len(str(result.get('result', '')))}")
+
+        if not result.get("success"):
+            err = result.get("error") or "[NO_TOOLCALL] 执行失败"
+            self._emit_error(err)
 
         if result.get("result"):
             self._emit_message("assistant", result["result"])
@@ -210,6 +216,10 @@ class AgentOrchestrator:
         if self.on_error:
             self._fire_callback(self.on_error, error)
 
+    def _emit_tool_call(self, tool_name: str, args: dict):
+        if self.on_tool_call:
+            self._fire_callback(self.on_tool_call, tool_name, args)
+
     def _end_session(self, result: str):
         try:
             from .. import action_log
@@ -218,29 +228,7 @@ class AgentOrchestrator:
             pass
 
     def _fire_callback(self, callback, *args):
-        """
-        非阻塞地在 Blender 主线程执行 UI 回调。
-        
-        关键：不能用 _execute_in_main_thread（会阻塞30秒等待结果），
-        必须用 bpy.app.timers.register 做 fire-and-forget。
-        """
-        try:
-            import bpy
-
-            def do_callback():
-                try:
-                    callback(*args)
-                except Exception as e:
-                    _log(f"Callback error: {e}")
-                return None  # 不重复执行
-
-            bpy.app.timers.register(do_callback)
-        except Exception:
-            # bpy 不可用时直接调用
-            try:
-                callback(*args)
-            except Exception:
-                pass
+        self._runtime_fire_callback(callback, *args)
 
     def clear_history(self):
         self._context.reset()

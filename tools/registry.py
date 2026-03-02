@@ -75,6 +75,9 @@ TOOL_GROUPS = {
         "get_action_log", "get_todo_list", "complete_todo",
         "analyze_scene",
     ],
+    "plan": [
+        "create_plan", "update_plan_step", "ask_question",
+    ],
     "file": [
         "file_read", "file_write", "file_list", "file_read_project",
     ],
@@ -92,11 +95,12 @@ INTENT_TOOL_GROUPS = {
     "generate_3d": ["meshy", "basic", "material_basic"],
     "search": ["search", "query"],
     "query": ["query", "basic", "meta"],
+    "plan": ["query", "search", "meta", "plan"],
     # general 意图给所有工具组，确保 LLM 能处理任何请求
     "general": [
         "basic", "material_basic", "shader", "shader_preset",
         "toon", "scene", "animation", "render", "meshy",
-        "search", "query", "meta", "file",
+        "search", "query", "meta", "file", "plan",
     ],
 }
 

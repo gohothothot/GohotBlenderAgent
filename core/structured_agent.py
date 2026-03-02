@@ -21,6 +21,7 @@
 import json
 import threading
 import traceback
+import time
 from types import SimpleNamespace
 from typing import Callable, Optional
 
@@ -42,6 +43,9 @@ from .safety_guard import (
     looks_like_final_summary,
 )
 from .pseudo_tool_parser import extract_pseudo_tool_calls
+from .runtime_core import RuntimeCoreMixin
+from ..context.vector_store import get_vector_store
+from ..ui.i18n import get_reply_language_hint
 
 
 def _log(msg: str):
@@ -105,7 +109,7 @@ _TOOL_RESULT_TEMPLATE = """[工具执行结果]
 [继续操作或总结结果]"""
 
 
-class StructuredAgent:
+class StructuredAgent(RuntimeCoreMixin):
     """
     结构化输出 Agent — XML 解析模式。
     
@@ -174,10 +178,12 @@ class StructuredAgent:
             if self._is_request_cancelled(request_id):
                 return
             self._log_action("start", user_message)
+            self._remember_text("user", user_message)
 
             # 路由
             r = route_message(user_message)
             _log(f"Route: intent={r.intent}, domain={r.domain}, complexity={r.complexity}")
+            memory_hint = self._build_memory_hint(user_message, r.complexity)
 
             # 获取工具子集
             tools = self._get_tools(r.intent)
@@ -188,12 +194,14 @@ class StructuredAgent:
             domain_hint = _DOMAIN_HINTS.get(r.domain, "")
 
             # 用户消息
-            augmented = _PREFLIGHT + user_message + domain_hint
+            language_hint = get_reply_language_hint(user_message)
+            augmented = _PREFLIGHT + user_message + domain_hint + memory_hint + language_hint
             self.conversation_history.append({"role": "user", "content": augmented})
 
             # 裁剪历史
             if len(self.conversation_history) > self.max_history * 2:
                 self.conversation_history = self.conversation_history[-self.max_history * 2:]
+            self._compact_history_if_needed()
 
             # 调用 LLM（不传 tools 参数！工具在 system prompt 里）
             response = self.llm.chat(
@@ -283,6 +291,7 @@ class StructuredAgent:
                         )
                         return
                     self.conversation_history.append({"role": "assistant", "content": raw_text})
+                    self._remember_text("assistant", raw_text)
                     self._log_action("end", (parsed.text or raw_text)[:200])
                     return
                 err = "[NO_TOOLCALL] 工具执行后未返回有效总结文本。"
@@ -295,6 +304,7 @@ class StructuredAgent:
                 # 工具轮后的最终收尾允许纯文本总结（无需再输出 XML）
                 if raw_text:
                     self.conversation_history.append({"role": "assistant", "content": raw_text})
+                    self._remember_text("assistant", raw_text)
                     self._log_action("end", (parsed.text or raw_text)[:200])
                     return
                 err = "[NO_TOOLCALL] 工具执行后未返回有效总结文本。"
@@ -356,6 +366,15 @@ class StructuredAgent:
             self._log_action("tool", tc.name, normalized_args, result)
 
             if result.get("success"):
+                payload = result.get("result")
+                if isinstance(payload, dict) and payload.get("type") == "ASK_QUESTION":
+                    try:
+                        prompt = json.dumps(payload, ensure_ascii=False)
+                    except Exception:
+                        prompt = str(payload)
+                    self._fire_callback(self.on_plan, f"__ASK_QUESTION__:{prompt}")
+                    self._log_action("message", f"[ASK_QUESTION] {prompt[:200]}")
+                    return
                 if result.get("result") == "NEEDS_PERMISSION_CONFIRMATION":
                     self._fire_callback(
                         self.on_permission_request,
@@ -504,70 +523,55 @@ class StructuredAgent:
             return normalized_args
 
     def _execute_in_main_thread(self, func, *args) -> dict:
-        """在 Blender 主线程执行"""
-        try:
-            import bpy
-            import queue
-            result_queue = queue.Queue()
-
-            def do_execute():
-                try:
-                    result = func(*args)
-                    result_queue.put(result)
-                except Exception as e:
-                    _log(f"Main thread error: {e}")
-                    result_queue.put({"success": False, "result": None, "error": str(e)})
-                return None
-
-            bpy.app.timers.register(do_execute)
-            try:
-                return result_queue.get(timeout=30.0)
-            except Exception:
-                return {"success": False, "result": None, "error": "操作超时（30秒）"}
-        except Exception:
-            return func(*args)
+        return self._runtime_execute_in_main_thread(func, *args)
 
     def _fire_callback(self, callback, *args):
-        """非阻塞 UI 回调"""
-        if not callback:
-            return
-        try:
-            import bpy
-
-            def do_callback():
-                try:
-                    callback(*args)
-                except Exception as e:
-                    _log(f"Callback error: {e}")
-                return None
-
-            bpy.app.timers.register(do_callback)
-        except Exception:
-            try:
-                callback(*args)
-            except Exception:
-                pass
+        self._runtime_fire_callback(callback, *args)
 
     def _log_action(self, action_type: str, *args):
-        """记录操作日志"""
+        self._runtime_log_action(action_type, *args)
+
+    def _compact_history_if_needed(self):
+        before_chars = self._runtime_history_chars(self.conversation_history)
+        self.conversation_history = self._runtime_compact_history_if_needed(
+            self.conversation_history,
+            char_budget=120000,
+            keep_tail_rounds=4,
+        )
+        after_chars = self._runtime_history_chars(self.conversation_history)
+        if after_chars < before_chars:
+            self._log_action("metric", {
+                "name": "history_compaction",
+                "saved_chars": before_chars - after_chars,
+                "before_chars": before_chars,
+                "after_chars": after_chars,
+            })
+
+    def _build_memory_hint(self, user_message: str, complexity: str) -> str:
+        if complexity != "complex":
+            return ""
         try:
-            from .. import action_log
-            if action_type == "start":
-                action_log.start_session(args[0])
-                action_log.log_agent_message("user", args[0])
-            elif action_type == "message":
-                action_log.log_agent_message("assistant", args[0])
-            elif action_type == "tool":
-                action_log.log_tool_call(args[0], args[1], args[2])
-            elif action_type == "error":
-                action_log.log_error("agent", args[0])
-                action_log.end_session(f"错误: {args[0][:200]}")
-            elif action_type == "end":
-                action_log.end_session(args[0] if args else "")
-            elif action_type == "metric":
-                payload = args[0] if args else {}
-                metric_name = payload.get("name", "unknown_metric")
-                action_log.log_metric(metric_name, payload)
+            store = get_vector_store()
+            hits = store.search(user_message, top_k=2)
+            lines = []
+            for h in hits:
+                text = (h.get("text") or "").replace("\n", " ")[:120]
+                if text:
+                    lines.append(f"- {text}")
+            if not lines:
+                return ""
+            return "\n[记忆检索提示]\n" + "\n".join(lines)
+        except Exception:
+            return ""
+
+    def _remember_text(self, role: str, text: str):
+        try:
+            if not text:
+                return
+            store = get_vector_store()
+            doc_id = f"{role}_{int(time.time() * 1000)}"
+            store.upsert(doc_id, text, {"role": role})
+            store.save()
         except Exception:
             pass
 

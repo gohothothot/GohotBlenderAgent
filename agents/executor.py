@@ -10,6 +10,7 @@ Executor Agent - 工具执行
 import json
 import threading
 import time
+from types import SimpleNamespace
 from ..llm.base import LLMProvider, LLMResponse
 from ..parsers.plan_parser import PlanStep
 from ..parsers.result_parser import summarize_tool_result
@@ -17,6 +18,8 @@ from ..context.prompts import AgentPrompts
 from ..context.manager import ContextManager
 from ..tools.registry import get_registry
 from ..core.safety_guard import looks_like_python_script, looks_like_script_output
+from ..core.xml_parser import parse as parse_xml
+from ..core.pseudo_tool_parser import extract_pseudo_tool_calls
 from .shader_read_agent import ShaderReadAgent
 
 
@@ -32,6 +35,7 @@ class ExecutorAgent:
         self._shader_reader = ShaderReadAgent(self._run_tool)
         self._shader_prewarm = None
         self._shader_prewarm_lock = threading.Lock()
+        self.on_tool_call = None
 
     def prewarm_shader_context(self, user_message: str):
         """后台预热 shader 读取上下文，供后续执行阶段复用"""
@@ -194,6 +198,14 @@ class ExecutorAgent:
                 final_text = response.text
 
             if not response.has_tool_calls:
+                recovered_calls = self._recover_tool_calls_from_text(response.text, tool_schemas)
+                if recovered_calls:
+                    _log(f"Recovered tool calls from text: {len(recovered_calls)}")
+                    tool_result_msgs, had_success = self._execute_recovered_calls(recovered_calls, all_results)
+                    if tool_result_msgs:
+                        messages.extend(self._llm.format_tool_results_as_messages(tool_result_msgs))
+                    if had_success:
+                        continue
                 if round_i < (max_rounds - 1):
                     if response.text and (looks_like_python_script(response.text) or looks_like_script_output(response.text)):
                         _log("Detected script-like output without tools, forcing corrective retry")
@@ -216,6 +228,11 @@ class ExecutorAgent:
             tool_result_msgs = []
             for tc in response.tool_calls:
                 _log(f"Running tool: {tc.name}({list(tc.arguments.keys()) if tc.arguments else []})")
+                if self.on_tool_call:
+                    try:
+                        self.on_tool_call(tc.name, tc.arguments or {})
+                    except Exception:
+                        pass
                 if tc.name == "execute_python":
                     result = {"success": False, "result": None, "error": "execute_python 已被禁用，请改用 MCP 工具"}
                     all_results.append({"tool": tc.name, "result": result})
@@ -236,12 +253,76 @@ class ExecutorAgent:
             messages.extend(self._llm.format_tool_results_as_messages(tool_result_msgs))
 
         last_success = all(r["result"].get("success", False) for r in all_results) if all_results else True
+        if not all_results:
+            return {
+                "success": False,
+                "result": final_text or "",
+                "tool_results": [],
+                "error": "[NO_TOOLCALL] 模型未触发任何 MCP 工具调用。",
+            }
         return {
             "success": last_success,
             "result": final_text or "执行完成",
             "tool_results": all_results,
             "error": None if last_success else "部分工具执行失败",
         }
+
+    def _recover_tool_calls_from_text(self, text: str, tool_schemas: list) -> list:
+        if not text:
+            return []
+        recovered = []
+        try:
+            parsed = parse_xml(text)
+            for tc in parsed.tool_calls:
+                recovered.append(
+                    SimpleNamespace(
+                        name=tc.name,
+                        arguments=tc.arguments or {},
+                        id=f"xml_{tc.id}",
+                    )
+                )
+        except Exception:
+            pass
+        if recovered:
+            return recovered
+        try:
+            names = {t.get("name") for t in (tool_schemas or []) if isinstance(t, dict)}
+            pseudo = extract_pseudo_tool_calls(text, names)
+            for idx, pc in enumerate(pseudo, start=1):
+                recovered.append(
+                    SimpleNamespace(
+                        name=pc.get("name", ""),
+                        arguments=pc.get("arguments") or {},
+                        id=f"pseudo_{idx}",
+                    )
+                )
+        except Exception:
+            pass
+        return recovered
+
+    def _execute_recovered_calls(self, recovered_calls: list, all_results: list) -> tuple[list, bool]:
+        tool_result_msgs = []
+        had_success = False
+        for tc in recovered_calls:
+            _log(f"Running recovered tool: {tc.name}({list(tc.arguments.keys()) if tc.arguments else []})")
+            if self.on_tool_call:
+                try:
+                    self.on_tool_call(tc.name, tc.arguments or {})
+                except Exception:
+                    pass
+            result = self._run_tool(tc.name, tc.arguments or {})
+            _log(f"Recovered tool result: {tc.name} → success={result.get('success')}")
+            all_results.append({"tool": tc.name, "result": result})
+            had_success = had_success or bool(result.get("success"))
+            summary = summarize_tool_result(tc.name, result, max_chars=2000)
+            tool_result_msgs.append(
+                self._llm.format_tool_result(
+                    getattr(tc, "id", f"recover_{tc.name}"),
+                    summary,
+                    is_error=not result.get("success"),
+                )
+            )
+        return tool_result_msgs, had_success
 
     def _run_tool(self, name: str, arguments: dict) -> dict:
         registry = get_registry()

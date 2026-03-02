@@ -46,6 +46,9 @@ _KEYWORD_RULES = [
     # 搜索/查询知识
     (["搜索", "search", "查找", "参考", "教程", "tutorial"],
      "search", "general"),
+    # 计划
+    (["计划", "规划", "plan", "roadmap", "方案"],
+     "plan", "general"),
 
     # 复杂着色器
     (["程序化材质", "procedural", "节点", "node", "shader", "着色器",

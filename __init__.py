@@ -120,6 +120,7 @@ class MCPBridgeServer:
 
 
 _mcp_server = None
+_chat_ui_error = ""
 
 
 class MCP_OT_StartServer(bpy.types.Operator):
@@ -163,6 +164,12 @@ class BLENDER_AGENT_PT_ServicePanel(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
 
+        if _chat_ui_error:
+            err_box = layout.box()
+            err_box.label(text="⚠️ Chat UI 加载失败:", icon="ERROR")
+            for line in _chat_ui_error.split("\n")[:5]:
+                err_box.label(text=line[:120])
+
         box = layout.box()
         box.label(text="🎨 Meshy AI 3D生成", icon="MESH_MONKEY")
         try:
@@ -198,6 +205,7 @@ base_classes = [
 
 
 def register():
+    global _chat_ui_error
     for cls in base_classes:
         bpy.utils.register_class(cls)
 
@@ -205,7 +213,9 @@ def register():
         from . import chat_ui
         chat_ui.register()
     except Exception as e:
-        print(f"[Blender Agent] Chat UI 注册失败: {e}")
+        import traceback
+        _chat_ui_error = traceback.format_exc()
+        print(f"[Blender Agent] Chat UI 注册失败:\n{_chat_ui_error}")
 
 
 def unregister():

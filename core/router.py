@@ -53,6 +53,8 @@ _KEYWORD_MAP = {
     # 搜索
     "搜索": ("search", "general"), "search": ("search", "general"), "查找": ("search", "general"),
     "参考": ("search", "general"), "教程": ("search", "general"),
+    # 规划
+    "计划": ("plan", "general"), "规划": ("plan", "general"), "plan": ("plan", "general"),
     # 3D 生成
     "meshy": ("generate_3d", "meshy"), "文生3d": ("generate_3d", "meshy"),
     "图生3d": ("generate_3d", "meshy"), "ai生成": ("generate_3d", "meshy"),

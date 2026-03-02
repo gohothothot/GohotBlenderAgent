@@ -13,6 +13,14 @@ def _log(msg: str):
     print(f"[Tools] {msg}")
 
 
+def _get_registry():
+    try:
+        from ..tools.registry import get_registry
+        return get_registry()
+    except Exception:
+        return None
+
+
 # ========== 工具分组（用于按意图筛选） ==========
 
 TOOL_GROUPS = {
@@ -79,6 +87,7 @@ INTENT_GROUPS = {
     "generate_3d": ["meshy", "basic", "material"],
     "search":      ["search", "meta"],
     "query":       ["basic", "material", "scene", "meta"],
+    "plan":        ["search", "meta", "file"],
     # general = 常用工具子集（约30个，避免 payload 过大导致 API 500）
     "general":     ["basic", "material", "scene", "shader", "meshy", "search", "meta", "file"],
 }
@@ -86,6 +95,13 @@ INTENT_GROUPS = {
 
 def get_tools_for_intent(intent: str) -> list:
     """根据意图获取工具定义子集"""
+    registry = _get_registry()
+    if registry is not None and registry.count > 0:
+        try:
+            return registry.get_schemas(registry.get_for_intent(intent))
+        except Exception:
+            pass
+
     groups = INTENT_GROUPS.get(intent, INTENT_GROUPS["general"])
     names = set()
     for g in groups:
@@ -111,6 +127,12 @@ def get_all_tools() -> list:
     """获取所有工具定义（延迟加载，缓存）"""
     global _TOOLS_CACHE
     if _TOOLS_CACHE is not None:
+        return _TOOLS_CACHE
+
+    registry = _get_registry()
+    if registry is not None and registry.count > 0:
+        _TOOLS_CACHE = registry.get_schemas(registry.get_all())
+        _log(f"Loaded {len(_TOOLS_CACHE)} tools from registry")
         return _TOOLS_CACHE
 
     try:
@@ -141,6 +163,9 @@ def execute_tool(tool_name: str, arguments: dict) -> dict:
     如果失败则尝试 mcp_tools 模块。
     """
     try:
+        registry = _get_registry()
+        if registry is not None and registry.count > 0:
+            return registry.execute(tool_name, arguments or {})
         from .. import tool_definitions
         return tool_definitions.execute_tool(tool_name, arguments)
     except ImportError:

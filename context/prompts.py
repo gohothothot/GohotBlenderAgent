@@ -2,6 +2,7 @@
 Agent Prompts - 各 Agent 的精简 System Prompt
 
 按领域分离，每个 Agent 只看到相关的最小 prompt。
+语言后缀由 _get_language_suffix() 动态读取，随插件 ui_language 设置变化。
 """
 
 
@@ -92,11 +93,28 @@ class AgentPrompts:
         "输出 JSON: {\"passed\": true/false, \"issues\": [\"问题描述\"], \"suggestion\": \"建议\"}"
     )
 
+    @staticmethod
+    def _get_language_suffix() -> str:
+        """读取插件语言偏好，返回注入 system prompt 的语言约束后缀。"""
+        try:
+            from ..ui.i18n import get_reply_language_hint
+            return get_reply_language_hint()
+        except Exception:
+            return ""
+
+    @classmethod
+    def get_router_prompt(cls) -> str:
+        return cls.ROUTER + cls._get_language_suffix()
+
+    @classmethod
+    def get_validator_prompt(cls) -> str:
+        return cls.VALIDATOR + cls._get_language_suffix()
+
     @classmethod
     def get_executor_prompt(cls, domain: str) -> str:
         domain_prompt = cls.EXECUTOR_BY_DOMAIN.get(domain, cls.EXECUTOR_BY_DOMAIN["general"])
-        return f"{cls.EXECUTOR_BASE}\n{domain_prompt}"
+        return f"{cls.EXECUTOR_BASE}\n{domain_prompt}{cls._get_language_suffix()}"
 
     @classmethod
     def get_planner_prompt(cls, tools_summary: str) -> str:
-        return cls.PLANNER.format(tools_summary=tools_summary)
+        return cls.PLANNER.format(tools_summary=tools_summary) + cls._get_language_suffix()

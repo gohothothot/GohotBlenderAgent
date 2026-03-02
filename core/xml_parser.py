@@ -63,6 +63,12 @@ _TOOL_CALL_PATTERN = re.compile(
     re.DOTALL
 )
 
+# 匹配自闭合 <tool_call name="xxx" />
+_TOOL_CALL_SELF_CLOSING_PATTERN = re.compile(
+    r'<tool_call\s+name=["\']([^"\']+)["\']\s*/>',
+    re.DOTALL
+)
+
 # 匹配 <param name="xxx">...</param>
 _PARAM_PATTERN = re.compile(
     r'<param\s+name=["\']([^"\']+)["\']\s*>(.*?)</param>',
@@ -84,6 +90,7 @@ def parse(text: str) -> ParseResult:
 
     tool_calls = []
     matches = list(_TOOL_CALL_PATTERN.finditer(text))
+    self_closing_matches = list(_TOOL_CALL_SELF_CLOSING_PATTERN.finditer(text))
 
     for match in matches:
         tool_name = match.group(1).strip()
@@ -100,8 +107,20 @@ def parse(text: str) -> ParseResult:
         tool_calls.append(tc)
         _log(f"Parsed: {tool_name}({arguments})")
 
+    # 兼容自闭合标签：<tool_call name="get_scene_info" />
+    for match in self_closing_matches:
+        tool_name = match.group(1).strip()
+        tc = ParsedToolCall(
+            id=ParsedToolCall.generate_id(),
+            name=tool_name,
+            arguments={},
+        )
+        tool_calls.append(tc)
+        _log(f"Parsed (self-closing): {tool_name}({{}})")
+
     # 去除 XML 标签，保留纯文本
-    clean_text = _TOOL_CALL_PATTERN.sub("", text).strip()
+    clean_text = _TOOL_CALL_PATTERN.sub("", text)
+    clean_text = _TOOL_CALL_SELF_CLOSING_PATTERN.sub("", clean_text).strip()
     # 清理多余空行
     clean_text = re.sub(r'\n{3,}', '\n\n', clean_text)
 

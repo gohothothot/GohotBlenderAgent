@@ -14,6 +14,7 @@ Blender Agent — 主 Agent (Native Tool Use 模式)
 import json
 import threading
 import traceback
+import time
 from typing import Callable, Optional
 
 from .llm import UnifiedLLM, LLMConfig, LLMResponse, ToolCall
@@ -34,6 +35,10 @@ from .safety_guard import (
     looks_like_final_summary,
 )
 from .pseudo_tool_parser import extract_pseudo_tool_calls
+from .xml_parser import parse as parse_xml
+from .runtime_core import RuntimeCoreMixin
+from ..context.vector_store import get_vector_store
+from ..ui.i18n import get_reply_language_hint
 
 
 def _log(msg: str):
@@ -80,7 +85,7 @@ HISTORY_CHAR_BUDGET = 120000
 HISTORY_KEEP_TAIL = 16
 
 
-class BlenderAgent:
+class BlenderAgent(RuntimeCoreMixin):
     """
     主 Agent — 直接传工具给 LLM，保证可靠性。
     """
@@ -95,6 +100,7 @@ class BlenderAgent:
         self._cancel_event = threading.Event()
         self._state_lock = threading.Lock()
         self._had_tool_call_in_request = False
+        self._xml_retry_attempted = False
 
         # UI 回调
         self.on_message: Optional[Callable] = None
@@ -155,19 +161,23 @@ class BlenderAgent:
                 return
             self._tool_rounds = 0
             self._had_tool_call_in_request = False
+            self._xml_retry_attempted = False
             # 日志
             self._log_action("start", user_message)
+            self._remember_text("user", user_message)
 
             # 路由
             r = route_message(user_message)
             _log(f"Route: intent={r.intent}, domain={r.domain}, complexity={r.complexity}")
+            memory_hint = self._build_memory_hint(user_message, r.complexity)
 
             # 获取工具子集
             tools = self._get_tools(r.intent)
 
             # 构建消息
             domain_hint = DOMAIN_HINTS.get(r.domain, "")
-            augmented = PREFLIGHT + user_message + domain_hint
+            language_hint = get_reply_language_hint(user_message)
+            augmented = PREFLIGHT + user_message + domain_hint + memory_hint + language_hint
             self.conversation_history.append({"role": "user", "content": augmented})
 
             # 裁剪历史
@@ -224,6 +234,26 @@ class BlenderAgent:
                 return
             if response.text:
                 available_names = {t.get("name") for t in (tools or []) if isinstance(t, dict)}
+                # 先尝试 XML 恢复（兼容不支持原生 tool_call 的模型）
+                parsed_xml = parse_xml(response.text)
+                if parsed_xml.tool_calls:
+                    recovered_calls = [
+                        ToolCall(
+                            id=f"xml_recovered_{idx}",
+                            name=tc.name,
+                            arguments=tc.arguments or {},
+                        )
+                        for idx, tc in enumerate(parsed_xml.tool_calls, start=1)
+                    ]
+                    _log(f"Recovered XML tool calls from text: {len(recovered_calls)}")
+                    for rc in recovered_calls:
+                        self._fire_callback(
+                            self.on_tool_call,
+                            f"__pseudo_recovered__:{rc.name}",
+                            rc.arguments,
+                        )
+                    self._execute_tools(recovered_calls, tools, request_id)
+                    return
                 pseudo_calls = extract_pseudo_tool_calls(response.text, available_names)
                 if pseudo_calls:
                     recovered_calls = [
@@ -245,6 +275,11 @@ class BlenderAgent:
                     return
             # 无工具调用 — 记录并结束
             if not allow_repair:
+                if not self._had_tool_call_in_request and (not self._xml_retry_attempted):
+                    _log("No native tool call after repair, trying XML-forced retry once")
+                    self._xml_retry_attempted = True
+                    self._force_xml_retry(request_id, tools)
+                    return
                 # 工具轮后的最终收尾允许纯文本总结
                 if response.text:
                     if not looks_like_final_summary(response.text):
@@ -253,6 +288,7 @@ class BlenderAgent:
                         return
                     self._fire_callback(self.on_message, "assistant", response.text)
                     self._log_action("message", response.text)
+                    self._remember_text("assistant", response.text)
                     self.conversation_history.append(
                         {"role": "assistant", "content": response.text}
                     )
@@ -281,6 +317,30 @@ class BlenderAgent:
             self._fire_callback(self.on_error, err)
             self._log_action("error", err)
             self._log_action("end", err)
+
+    def _force_xml_retry(self, request_id: int, tools: list):
+        if self._is_request_cancelled(request_id):
+            return
+        try:
+            tool_names = [t.get("name") for t in (tools or []) if isinstance(t, dict) and t.get("name")]
+            tool_hint = ", ".join(tool_names[:40])
+            xml_msg = (
+                "[系统硬回退] 你现在必须使用 XML 方式输出工具调用，不要输出解释文本。"
+                "格式如下：<tool_call name=\"工具名\"><param name=\"参数名\">值</param></tool_call>。"
+                "禁止 Python 代码、禁止伪代码。"
+                f"仅可使用本地工具：{tool_hint}。请立即输出至少一个 tool_call。"
+            )
+            self.conversation_history.append({"role": "user", "content": xml_msg})
+            response = self.llm.chat(
+                messages=self.conversation_history,
+                system=SYSTEM_PROMPT,
+                tools=tools,
+            )
+            if self._is_request_cancelled(request_id):
+                return
+            self._handle_response(response, tools, request_id, allow_repair=False)
+        except Exception as e:
+            self._fire_callback(self.on_error, f"XML 硬回退失败: {e}")
 
     def _execute_tools(self, tool_calls: list, tools: list, request_id: int):
         """执行工具调用"""
@@ -334,6 +394,16 @@ class BlenderAgent:
 
             if result.get("result") == "NEEDS_VISION_ANALYSIS":
                 self._handle_vision(tc.id, result, request_id)
+                return
+
+            payload = result.get("result")
+            if isinstance(payload, dict) and payload.get("type") == "ASK_QUESTION":
+                try:
+                    prompt = json.dumps(payload, ensure_ascii=False)
+                except Exception:
+                    prompt = str(payload)
+                self._fire_callback(self.on_plan, f"__ASK_QUESTION__:{prompt}")
+                self._log_action("message", f"[ASK_QUESTION] {prompt[:200]}")
                 return
 
             # 格式化结果
@@ -497,6 +567,8 @@ class BlenderAgent:
             repair_msg = (
                 "[系统纠偏] 你刚刚没有正确调用工具（或输出了脚本/伪代码），这是被禁止的。"
                 "必须改为调用 MCP 工具完成任务；禁止任何 Python 代码块、函数调用示例、代码围栏。"
+                "如果你的模型不支持原生 function-calling，请改用可解析文本格式输出工具调用："
+                "<tool_call name=\"工具名\"><param name=\"参数名\">值</param></tool_call>。"
                 "你只能使用以下本地 Blender 工具集，不可使用 bash_tool/str_replace 等外部工具："
                 f"{tool_hint}。现在请立即输出 tool calls。"
             )
@@ -513,122 +585,72 @@ class BlenderAgent:
             self._fire_callback(self.on_error, f"纠偏重试失败: {e}")
 
     def _execute_in_main_thread(self, func, *args) -> dict:
-        """在 Blender 主线程执行函数"""
-        try:
-            import bpy
-            import queue
-            result_queue = queue.Queue()
-
-            def do_execute():
-                try:
-                    result = func(*args)
-                    result_queue.put(result)
-                except Exception as e:
-                    _log(f"Main thread error: {e}")
-                    result_queue.put({"success": False, "result": None, "error": str(e)})
-                return None
-
-            bpy.app.timers.register(do_execute)
-
-            try:
-                return result_queue.get(timeout=30.0)
-            except Exception:
-                return {"success": False, "result": None, "error": "操作超时（30秒）"}
-        except Exception as e:
-            # bpy 不可用时直接调用
-            return func(*args)
+        return self._runtime_execute_in_main_thread(func, *args)
 
     def _fire_callback(self, callback, *args):
-        """非阻塞地在主线程执行 UI 回调"""
-        if not callback:
-            return
-        try:
-            import bpy
-
-            def do_callback():
-                try:
-                    callback(*args)
-                except Exception as e:
-                    _log(f"Callback error: {e}")
-                return None
-
-            bpy.app.timers.register(do_callback)
-        except Exception:
-            try:
-                callback(*args)
-            except Exception:
-                pass
+        self._runtime_fire_callback(callback, *args)
 
     def _history_chars(self, messages: list = None) -> int:
-        total = 0
         items = messages if messages is not None else self.conversation_history
-        for msg in items:
-            content = msg.get("content")
-            if isinstance(content, str):
-                total += len(content)
-            elif isinstance(content, list):
-                for block in content:
-                    if isinstance(block, dict):
-                        total += len(json.dumps(block, ensure_ascii=False))
-                    else:
-                        total += len(str(block))
-            elif content is not None:
-                total += len(str(content))
-        return total
+        return self._runtime_history_chars(items)
 
     def _compact_history_if_needed(self):
-        if self._history_chars() <= HISTORY_CHAR_BUDGET:
-            return
-        self.conversation_history = self._compact_history(self.conversation_history)
+        before_chars = self._history_chars()
+        self.conversation_history = self._runtime_compact_history_if_needed(
+            self.conversation_history,
+            char_budget=HISTORY_CHAR_BUDGET,
+            keep_tail_rounds=max(2, HISTORY_KEEP_TAIL // 4),
+        )
+        after_chars = self._history_chars()
+        if after_chars < before_chars:
+            self._log_action("metric", {
+                "name": "history_compaction",
+                "saved_chars": before_chars - after_chars,
+                "before_chars": before_chars,
+                "after_chars": after_chars,
+            })
 
     def _compact_history(self, history: list) -> list:
-        if len(history) <= HISTORY_KEEP_TAIL + 1:
-            return history
-
-        head = history[:-HISTORY_KEEP_TAIL]
-        tail = history[-HISTORY_KEEP_TAIL:]
-
-        summary_lines = ["[历史压缩摘要] 以下为较早轮次的关键信息："]
-        for msg in head[-40:]:
-            role = msg.get("role", "unknown")
-            content = msg.get("content")
-            if isinstance(content, str):
-                snippet = content.replace("\n", " ")[:180]
-                summary_lines.append(f"- {role}: {snippet}")
-            elif isinstance(content, list):
-                tool_events = 0
-                for block in content:
-                    if isinstance(block, dict) and block.get("type") in ("tool_use", "tool_result"):
-                        tool_events += 1
-                summary_lines.append(f"- {role}: 结构化内容 {len(content)} 块（工具相关 {tool_events}）")
-            else:
-                summary_lines.append(f"- {role}: {str(content)[:120]}")
-
-        compacted = [{"role": "system", "content": "\n".join(summary_lines)}]
-        compacted.extend(tail)
+        compacted = self._runtime_compact_history(
+            history,
+            keep_tail_rounds=max(2, HISTORY_KEEP_TAIL // 4),
+        )
         _log(f"History compacted: {len(history)} -> {len(compacted)}, chars={self._history_chars(compacted)}")
         return compacted
 
     def _log_action(self, action_type: str, *args):
-        """记录操作日志"""
+        self._runtime_log_action(action_type, *args)
+
+    def _build_memory_hint(self, user_message: str, complexity: str) -> str:
+        """
+        Inject lightweight vector-memory hints for complex requests.
+        """
+        if complexity != "complex":
+            return ""
         try:
-            from .. import action_log
-            if action_type == "start":
-                action_log.start_session(args[0])
-                action_log.log_agent_message("user", args[0])
-            elif action_type == "message":
-                action_log.log_agent_message("assistant", args[0])
-            elif action_type == "tool":
-                action_log.log_tool_call(args[0], args[1], args[2])
-            elif action_type == "error":
-                action_log.log_error("agent", args[0])
-                action_log.end_session(f"错误: {args[0][:200]}")
-            elif action_type == "end":
-                action_log.end_session(args[0] if args else "")
-            elif action_type == "metric":
-                payload = args[0] if args else {}
-                metric_name = payload.get("name", "unknown_metric")
-                action_log.log_metric(metric_name, payload)
+            store = get_vector_store()
+            hits = store.search(user_message, top_k=2)
+            if not hits:
+                return ""
+            lines = []
+            for h in hits:
+                text = (h.get("text") or "").replace("\n", " ")[:120]
+                if text:
+                    lines.append(f"- {text}")
+            if not lines:
+                return ""
+            return "\n[记忆检索提示]\n" + "\n".join(lines)
+        except Exception:
+            return ""
+
+    def _remember_text(self, role: str, text: str):
+        try:
+            if not text:
+                return
+            store = get_vector_store()
+            doc_id = f"{role}_{int(time.time() * 1000)}"
+            store.upsert(doc_id, text, {"role": role})
+            store.save()
         except Exception:
             pass
 
