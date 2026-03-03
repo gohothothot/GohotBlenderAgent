@@ -72,6 +72,9 @@ class AgentState(PropertyGroup):
     last_exec_mode: StringProperty(name="Last Exec Mode", default="")
     last_route_hint: StringProperty(name="Last Route Hint", default="-")
     last_stall_reason: StringProperty(name="Last Stall Reason", default="-")
+    last_skill_matches: StringProperty(name="Last Skill Matches", default="-")
+    agent_last_skill_matches: StringProperty(name="Agent Last Skill Matches", default="-")
+    meshy_last_skill_matches: StringProperty(name="Meshy Last Skill Matches", default="-")
     fallback_attempted: BoolProperty(name="Fallback Attempted", default=False)
     request_had_tool_call: BoolProperty(name="Request Had Tool Call", default=False)
     pseudo_fallback_hits: IntProperty(name="Pseudo Fallback Hits", default=0)
@@ -234,6 +237,15 @@ def clear_pending_plan(channel: str = "agent"):
     if prefix == "agent":
         state.pending_plan_question = ""
         state.pending_plan_options_json = "[]"
+
+
+def set_skill_matches(skill_ids: list[str], channel: str = "agent"):
+    state = _get_state()
+    prefix = _channel_prefix(channel)
+    text = ", ".join(skill_ids[:6]) if skill_ids else "-"
+    setattr(state, f"{prefix}_last_skill_matches", text)
+    if prefix == "agent":
+        state.last_skill_matches = text
 
 
 def _add_message(role: str, content: str, is_code: bool = False, channel: str = "auto"):

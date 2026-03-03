@@ -31,6 +31,7 @@ from .state import (
     set_pending_code,
     clear_pending_code,
     set_pending_plan,
+    set_skill_matches,
 )
 from .chat_status import infer_route_hint_from_tool
 from .i18n import tr
@@ -334,6 +335,17 @@ def _on_tool_call(tool_name: str, args: dict):
 
 def _on_plan(plan_text: str):
     state = _get_state()
+    if isinstance(plan_text, str) and plan_text.startswith("__SKILL_MATCH__:"):
+        raw = plan_text[len("__SKILL_MATCH__:"):]
+        try:
+            payload = json.loads(raw)
+            skills = payload.get("skills") or []
+            if isinstance(skills, list):
+                set_skill_matches([str(s) for s in skills], channel="agent")
+                _add_message("system", f"🧩 Skill命中: {', '.join([str(s) for s in skills[:6]])}", channel="agent")
+                return
+        except Exception:
+            pass
     if isinstance(plan_text, str) and plan_text.startswith("__ASK_QUESTION__:"):
         raw = plan_text[len("__ASK_QUESTION__:"):]
         try:

@@ -1,0 +1,119 @@
+[
+  {
+    "id": "scene.daylight_setup",
+    "name": "Daylight world setup",
+    "domain": "scene",
+    "intents": ["create", "modify", "render"],
+    "tags": ["sun", "world", "daylight", "water"],
+    "description": "Set world and sun baseline for outdoor scenes.",
+    "tools": ["scene_setup_daylight_water", "scene_set_world", "scene_add_light", "scene_get_world_info"],
+    "quality_hints": [
+      "先建立可用基础光照，再微调强度/颜色，避免一次性过度调参。"
+    ],
+    "verify_tools": ["scene_get_world_info", "get_scene_info"]
+  },
+  {
+    "id": "scene.camera_setup",
+    "name": "Camera placement and activation",
+    "domain": "scene",
+    "intents": ["create", "modify", "render"],
+    "tags": ["camera", "framing", "render"],
+    "description": "Add and activate camera with scene-aware placement.",
+    "tools": ["scene_add_camera", "scene_set_active_camera", "get_scene_info"],
+    "quality_hints": [
+      "相机创建后需确认 active camera 已切换成功。"
+    ],
+    "verify_tools": ["get_scene_info"]
+  },
+  {
+    "id": "scene.light_edit",
+    "name": "Light create and tweak",
+    "domain": "scene",
+    "intents": ["create", "modify", "render"],
+    "tags": ["light", "energy", "shadow"],
+    "description": "Create or modify light objects for better shading.",
+    "tools": ["scene_add_light", "scene_modify_light", "get_scene_info"],
+    "quality_hints": [
+      "灯光调整以主光、辅光分层进行，避免整体过平。"
+    ],
+    "verify_tools": ["get_scene_info"]
+  },
+  {
+    "id": "modifier.subdivision",
+    "name": "Subdivision workflow",
+    "domain": "scene",
+    "intents": ["modify", "create"],
+    "tags": ["modifier", "subdivision", "smooth"],
+    "description": "Add subdivision modifier and set levels.",
+    "tools": ["scene_add_modifier", "scene_set_modifier_param", "get_object_info"],
+    "quality_hints": [
+      "细分级别建议区分 viewport 与 render，避免视口过重。"
+    ],
+    "verify_tools": ["get_object_info"]
+  },
+  {
+    "id": "modifier.bevel",
+    "name": "Bevel workflow",
+    "domain": "scene",
+    "intents": ["modify"],
+    "tags": ["modifier", "bevel", "hard-surface"],
+    "description": "Add bevel modifier with width/segments tuning.",
+    "tools": ["scene_add_modifier", "scene_set_modifier_param", "get_object_info"],
+    "quality_hints": [
+      "倒角宽度应与模型尺度匹配，避免边缘发糊。"
+    ],
+    "verify_tools": ["get_object_info"]
+  },
+  {
+    "id": "modifier.array",
+    "name": "Array workflow",
+    "domain": "scene",
+    "intents": ["modify", "create"],
+    "tags": ["modifier", "array", "instancing"],
+    "description": "Add array modifier and tune count/offset.",
+    "tools": ["scene_add_modifier", "scene_set_modifier_param", "get_object_info"],
+    "quality_hints": [
+      "Array 调整后优先检查数量与偏移是否符合预期。"
+    ],
+    "verify_tools": ["get_object_info"]
+  },
+  {
+    "id": "scene.parent_duplicate",
+    "name": "Duplicate and parent",
+    "domain": "scene",
+    "intents": ["modify", "create"],
+    "tags": ["duplicate", "parent", "hierarchy"],
+    "description": "Duplicate object and establish hierarchy.",
+    "tools": ["scene_duplicate_object", "scene_parent_object", "get_scene_info"],
+    "quality_hints": [
+      "建立父子关系后需确认层级正确，避免循环依赖。"
+    ],
+    "verify_tools": ["get_scene_info", "get_object_info"]
+  },
+  {
+    "id": "scene.visibility",
+    "name": "Visibility control",
+    "domain": "scene",
+    "intents": ["modify", "query"],
+    "tags": ["visibility", "viewport", "render"],
+    "description": "Toggle object visibility in viewport and render.",
+    "tools": ["scene_set_visibility", "get_object_info", "get_scene_info"],
+    "quality_hints": [
+      "可见性操作后需同步检查 viewport/render 两种状态。"
+    ],
+    "verify_tools": ["get_object_info"]
+  },
+  {
+    "id": "render.eevee_refraction",
+    "name": "EEVEE refraction setup",
+    "domain": "render",
+    "intents": ["render", "modify"],
+    "tags": ["eevee", "ssr", "refraction"],
+    "description": "Enable EEVEE settings needed by transmissive materials.",
+    "tools": ["scene_get_render_settings", "scene_set_render_settings", "shader_configure_eevee"],
+    "quality_hints": [
+      "开启 SSR/Refraction 后，再验证材质透射是否生效。"
+    ],
+    "verify_tools": ["scene_get_render_settings", "shader_get_material_summary"]
+  }
+]

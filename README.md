@@ -70,6 +70,16 @@ AI 驱动的 Blender 助手插件，支持 MCP 工具执行、材质/场景自�
 - `先检查场景，再把世界环境调成白天户外风格`
 - `用 Cycles 渲染，分辨率 1920x1080，128 采样`
 
+### HTTP MCP（白名单）端点
+- `GET /health`：服务健康检查
+- `GET /tools`：查询当前白名单工具
+- `POST /tool`：执行工具，格式：`{"tool":"object.create_cube","args":{"size_m":2.0,"location":[0,0,1]}}`
+
+### 新增工具示例：Subdivision 修改器
+- 工具名：`object.add_subdivision_modifier`
+- 参数：`object_name`（必填）、`levels`、`render_levels`
+- 链路：`blender_addon/tools.py` 白名单注册 → `tool_definitions.py` 映射 → `scene_tools.scene_add_modifier(SUBSURF)`
+
 ### 水面反射推荐流程
 - 先调用 `scene_setup_daylight_water`
 - 再对水材质做细调（IOR/Transmission/Roughness/法线）

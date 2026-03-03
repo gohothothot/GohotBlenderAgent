@@ -52,6 +52,7 @@ from .ui.meshy_ops import (
 )
 from .ui.smoke_runner import (
     AGENT_OT_RunSmokeTests,
+    AGENT_OT_RunBackendAgent2Tests,
     AGENT_OT_SendSmokeFailureToAgent,
     AGENT_OT_AutoFixSmokeFailures,
     init_smoke_callbacks as _smoke_init_callbacks,
@@ -120,9 +121,9 @@ class BlenderAgentPreferences(AddonPreferences):
         name="Agent 模式",
         description="选择 Agent 工具调用模式",
         items=[
-            ("native", "Native Tool Use", "使用 API 原生 tool_use（Anthropic/OpenAI 标准）"),
-            ("structured", "Structured XML", "LLM 生成文本 + XML 标签，外部解析器触发工具（更省 token，兼容性更好）"),
-            ("orchestrator", "Plan Orchestrator", "复杂任务启用 Router/Planner/Executor/Validator 的分步执行链"),
+            ("native", "Native", "使用 API 原生工具调用协议（tool/function calling），执行路径更直接"),
+            ("structured", "Structured", "使用结构化文本工具调用（非原生 tool_use），兼容性更高且更省上下文"),
+            ("orchestrator", "Plan", "复杂任务启用 Router/Planner/Executor/Validator 分步执行链"),
         ],
         default="native",
     )
@@ -828,6 +829,7 @@ classes = [
     AGENT_OT_ViewPerformanceReport,
     AGENT_OT_ExportPerformanceReport,
     AGENT_OT_RunSmokeTests,
+    AGENT_OT_RunBackendAgent2Tests,
     AGENT_OT_SendSmokeFailureToAgent,
     AGENT_OT_ClearSmokeFailures,
     AGENT_OT_AutoFixSmokeFailures,

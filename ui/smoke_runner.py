@@ -119,6 +119,44 @@ def _run_target_test(failure: dict) -> dict:
         }
 
 
+def _run_backend_agent2_suite() -> dict:
+    """
+    运行 Agent2 backend 基础测试（tests/test_backend_agent2_basics.py）。
+    该入口用于 Blender UI 一键快测。
+    """
+    root_dir = os.path.dirname(os.path.dirname(__file__))
+    tests_dir = os.path.join(root_dir, "tests")
+    if root_dir not in sys.path:
+        sys.path.insert(0, root_dir)
+    if not os.path.isdir(tests_dir):
+        return {"ok": False, "summary": "tests 目录不存在", "details": [], "failures": []}
+
+    stream = io.StringIO()
+    try:
+        loader = unittest.TestLoader()
+        suite = loader.loadTestsFromName("tests.test_backend_agent2_basics")
+        runner = unittest.TextTestRunner(stream=stream, verbosity=2)
+        result = runner.run(suite)
+        details = stream.getvalue().splitlines()[-40:]
+        failures = []
+        for case, tb in list(result.failures) + list(result.errors):
+            name = getattr(case, "id", lambda: str(case))()
+            tail = (tb or "").splitlines()[-1] if tb else ""
+            failures.append({"test": name, "error": tail})
+        summary = (
+            f"agent2_backend, tests={result.testsRun}, failures={len(result.failures)}, "
+            f"errors={len(result.errors)}, skipped={len(getattr(result, 'skipped', []))}"
+        )
+        return {"ok": result.wasSuccessful(), "summary": summary, "details": details, "failures": failures}
+    except Exception as e:
+        return {
+            "ok": False,
+            "summary": f"Agent2 backend 测试异常: {e}",
+            "details": traceback.format_exc().splitlines()[-40:],
+            "failures": [{"test": "agent2_backend_runner", "error": str(e)}],
+        }
+
+
 # ---------- autofix queue ----------
 
 def _autofix_send_next():
@@ -270,6 +308,48 @@ class AGENT_OT_RunSmokeTests(Operator):
             col.label(text=line if line else " ")
 
 
+class AGENT_OT_RunBackendAgent2Tests(Operator):
+    bl_idname = "agent.run_backend_agent2_tests"
+    bl_label = "运行 Agent2 Backend 快测"
+    bl_description = "执行 tests.test_backend_agent2_basics，快速验证 Agent2 backend 模块链路"
+
+    _lines = None
+
+    def invoke(self, context, event):
+        result = _run_backend_agent2_suite()
+        summary = result.get("summary", "")
+        details = result.get("details", [])
+        self._lines = [f"Agent2 Backend Tests: {summary}", "-" * 60] + details
+
+        failures = result.get("failures", []) or []
+        if failures:
+            msg_lines = ["🧪 Agent2 Backend 快测失败："]
+            for f in failures[:5]:
+                msg_lines.append(f"- {f.get('test', 'unknown')}: {f.get('error', '')[:180]}")
+            _add_message("system", "\n".join(msg_lines), channel="agent")
+            self.report({"WARNING"}, "Agent2 backend 快测失败")
+        else:
+            _add_message("system", f"🧪 Agent2 Backend 快测通过：{summary}", channel="agent")
+            self.report({"INFO"}, "Agent2 backend 快测通过")
+
+        return context.window_manager.invoke_props_dialog(self, width=860)
+
+    def execute(self, context):
+        result = _run_backend_agent2_suite()
+        if result.get("ok"):
+            self.report({"INFO"}, result.get("summary", "Agent2 backend tests passed"))
+        else:
+            self.report({"WARNING"}, result.get("summary", "Agent2 backend tests failed"))
+        return {"FINISHED"}
+
+    def draw(self, context):
+        layout = self.layout
+        box = layout.box()
+        col = box.column(align=True)
+        for line in (self._lines or ["暂无结果"]):
+            col.label(text=line if line else " ")
+
+
 class AGENT_OT_SendSmokeFailureToAgent(Operator):
     bl_idname = "agent.send_smoke_failure_to_agent"
     bl_label = "修复 Smoke 失败"
@@ -334,6 +414,7 @@ class AGENT_OT_AutoFixSmokeFailures(Operator):
 
 SMOKE_CLASSES = [
     AGENT_OT_RunSmokeTests,
+    AGENT_OT_RunBackendAgent2Tests,
     AGENT_OT_SendSmokeFailureToAgent,
     AGENT_OT_AutoFixSmokeFailures,
 ]

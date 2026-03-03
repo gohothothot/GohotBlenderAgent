@@ -1,0 +1,32 @@
+{
+  "entries": [
+    {
+      "term": "Principled BSDF",
+      "aliases": ["PBR", "原理化BSDF"],
+      "definition": "Blender 通用物理材质节点，常用参数包括 Base Color、Metallic、Roughness、IOR、Transmission。",
+      "constraints": ["改参数前先确认材质存在并被对象使用"],
+      "links": ["https://docs.blender.org/manual/zh-hans/latest/render/shader_nodes/shader/principled.html"]
+    },
+    {
+      "term": "Roughness",
+      "aliases": ["粗糙度"],
+      "definition": "控制高光扩散，值越低越镜面，值越高越漫反射。",
+      "constraints": ["通常范围 0.0 - 1.0"],
+      "links": ["https://docs.blender.org/manual/zh-hans/latest/render/shader_nodes/shader/principled.html"]
+    },
+    {
+      "term": "Bevel Modifier",
+      "aliases": ["倒角修改器", "bevel"],
+      "definition": "给网格边缘增加倒角，常用于硬表面建模。",
+      "constraints": ["宽度应和模型尺度匹配"],
+      "links": ["https://docs.blender.org/manual/zh-hans/latest/modeling/modifiers/generate/bevel.html"]
+    },
+    {
+      "term": "Cycles",
+      "aliases": ["路径追踪渲染"],
+      "definition": "Blender 物理正确渲染引擎，质量高但渲染慢。",
+      "constraints": ["设置分辨率与采样避免过慢"],
+      "links": ["https://docs.blender.org/manual/zh-hans/latest/render/cycles/index.html"]
+    }
+  ]
+}

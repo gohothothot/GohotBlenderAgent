@@ -30,14 +30,31 @@ def _active_messages(state):
 class AGENT_OT_SetAgentMode(Operator):
     bl_idname = "agent.set_agent_mode"
     bl_label = "设置执行模式"
+    bl_description = "切换 Agent 执行模式"
 
     mode: StringProperty(default="native")
+
+    @classmethod
+    def description(cls, context, properties):
+        mode = getattr(properties, "mode", "")
+        if mode == "native":
+            return "Native：使用模型原生工具调用协议（tool/function calling），简单任务响应更快。"
+        if mode == "structured":
+            return "Structured：使用结构化文本工具调用（非原生 tool_use），兼容性更好、上下文开销更低。"
+        if mode == "orchestrator":
+            return "Plan：Router/Planner/Executor/Validator 分步执行，适合复杂多步骤任务。"
+        return cls.bl_description
 
     def execute(self, context):
         prefs = get_preferences()
         if self.mode in ("native", "structured", "orchestrator"):
             prefs.agent_mode = self.mode
-            _add_message("system", f"已切换执行模式：{self.mode}")
+            mode_label = {
+                "native": "Native",
+                "structured": "Structured",
+                "orchestrator": "Plan",
+            }.get(self.mode, self.mode)
+            _add_message("system", f"已切换执行模式：{mode_label}")
         return {"FINISHED"}
 
 

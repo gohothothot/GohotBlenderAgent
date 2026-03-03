@@ -20,11 +20,28 @@ from ..tools.registry import get_registry
 from ..core.safety_guard import looks_like_python_script, looks_like_script_output
 from ..core.xml_parser import parse as parse_xml
 from ..core.pseudo_tool_parser import extract_pseudo_tool_calls
+from ..core.skill_registry import select_tools_for_request, build_skill_guidance
 from .shader_read_agent import ShaderReadAgent
 
 
 def _log(msg: str):
     print(f"[Executor] {msg}")
+
+
+_STANDARD_TOOL_PRIORITY = [
+    "scene.get_summary",
+    "object.create_cube",
+    "object.create_plane",
+    "object.create_uv_sphere",
+    "object.set_transform",
+    "object.add_modifier_bevel",
+    "object.add_subdivision_modifier",
+    "material.create_principled",
+    "material.set_base_color",
+    "render.set_engine_cycles",
+    "render.set_resolution",
+    "render.render_still",
+]
 
 
 class ExecutorAgent:
@@ -36,6 +53,7 @@ class ExecutorAgent:
         self._shader_prewarm = None
         self._shader_prewarm_lock = threading.Lock()
         self.on_tool_call = None
+        self.on_plan = None
 
     def prewarm_shader_context(self, user_message: str):
         """后台预热 shader 读取上下文，供后续执行阶段复用"""
@@ -82,12 +100,34 @@ class ExecutorAgent:
         registry = get_registry()
         tools = registry.get_for_intent(intent)
         tool_schemas = registry.get_schemas(tools)
+        selected, matched_skill_ids = select_tools_for_request(
+            tools=tool_schemas,
+            query=user_message,
+            intent=intent,
+            domain=domain,
+            top_k=8,
+            max_tools=32,
+        )
+        if matched_skill_ids and len(selected) != len(tool_schemas):
+            _log(f"Skill-retrieved subset(simple): {len(selected)}/{len(tool_schemas)} via {matched_skill_ids[:4]}")
+            tool_schemas = selected
         _log(f"execute_simple: domain={domain}, intent={intent}, tools_count={len(tools)}, registry_total={registry.count}")
 
         system = AgentPrompts.get_executor_prompt(domain)
-        # 强化工具使用指令（与旧 BlenderAgent 一致）
-        preflight = "[系统提醒] 你是 Blender 操作者，必须使用提供的工具执行操作。禁止纯文字回复，立即调用工具。\n\n"
-        messages = [{"role": "user", "content": preflight + user_message}]
+        skill_hint, matched_skill_ids = build_skill_guidance(
+            query=user_message,
+            intent=intent,
+            domain=domain,
+            top_k=5,
+        )
+        if matched_skill_ids and self.on_plan:
+            try:
+                self.on_plan(f"__SKILL_MATCH__:{json.dumps({'skills': matched_skill_ids}, ensure_ascii=False)}")
+            except Exception:
+                pass
+        # 强化工具使用指令（白名单优先 + 禁止脚本）
+        preflight = self._build_tool_preflight_hint()
+        messages = [{"role": "user", "content": preflight + user_message + (("\n" + skill_hint) if skill_hint else "")}]
         if domain == "shader":
             shader_ctx = self._consume_shader_prewarm_context()
             ctx_source = "prewarm_cache"
@@ -140,12 +180,37 @@ class ExecutorAgent:
         intent = intent_groups.get(domain, "general")
         tools = registry.get_for_intent(intent)
         tool_schemas = registry.get_schemas(tools)
+        selected, matched_skill_ids = select_tools_for_request(
+            tools=tool_schemas,
+            query=f"{user_message}\n{step.description or ''}",
+            intent=intent,
+            domain=domain,
+            top_k=8,
+            max_tools=28,
+        )
+        if matched_skill_ids and len(selected) != len(tool_schemas):
+            _log(f"Skill-retrieved subset(step): {len(selected)}/{len(tool_schemas)} via {matched_skill_ids[:4]}")
+            tool_schemas = selected
 
         system = AgentPrompts.get_executor_prompt(domain)
         ctx = ContextManager()
         messages = ctx.build_executor_context(
             step.description, step.params, prev_summary, user_message,
         )
+        messages.append({"role": "user", "content": self._build_tool_preflight_hint()})
+        skill_hint, matched_skill_ids = build_skill_guidance(
+            query=f"{user_message}\n{step.description or ''}",
+            intent=intent,
+            domain=domain,
+            top_k=5,
+        )
+        if matched_skill_ids and self.on_plan:
+            try:
+                self.on_plan(f"__SKILL_MATCH__:{json.dumps({'skills': matched_skill_ids}, ensure_ascii=False)}")
+            except Exception:
+                pass
+        if skill_hint:
+            messages.append({"role": "user", "content": skill_hint})
         if domain == "shader":
             shader_ctx = self._consume_shader_prewarm_context()
             ctx_source = "prewarm_cache"
@@ -348,3 +413,16 @@ class ExecutorAgent:
             action_log.log_metric(metric_name, payload)
         except Exception:
             pass
+
+    @staticmethod
+    def _build_tool_preflight_hint() -> str:
+        ordered = ", ".join(_STANDARD_TOOL_PRIORITY)
+        return (
+            "[系统提醒] 你是 Blender 工具执行代理，必须调用工具完成任务。\n"
+            "- 严禁输出 Python 脚本、伪代码、代码块或函数示例。\n"
+            "- 严禁调用 execute_python。\n"
+            "- 优先使用标准白名单工具名，不要使用旧别名。\n"
+            f"- 推荐优先序：{ordered}\n"
+            "- 涉及细分曲面时，优先用 object.add_subdivision_modifier。"
+            "\n\n"
+        )

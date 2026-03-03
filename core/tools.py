@@ -81,6 +81,7 @@ INTENT_GROUPS = {
     "modify":      ["basic", "material", "shader", "scene", "search"],
     "delete":      ["basic", "scene"],
     "shader":      ["material", "shader", "search"],
+    "shader_complex": ["material", "shader", "search", "meta"],
     "toon":        ["material", "toon", "shader"],
     "animation":   ["animation", "shader", "basic"],
     "render":      ["render", "scene"],

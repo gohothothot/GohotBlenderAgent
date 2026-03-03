@@ -1,0 +1,44 @@
+{
+  "recipes": [
+    {
+      "id": "recipe.create_cube_bevel_red_cycles",
+      "task_type": "general",
+      "title": "创建立方体 + 倒角 + 红色材质 + Cycles 渲染",
+      "steps": [
+        "object.create_cube(size_m, location)",
+        "object.add_modifier_bevel(width, segments)",
+        "material.create_principled(name)",
+        "material.set_base_color(material_name, rgba)",
+        "render.set_engine_cycles()",
+        "render.set_resolution(width, height)",
+        "render.render_still(path)"
+      ],
+      "common_errors": [
+        "对象未激活导致修改器添加失败",
+        "材质名不一致导致颜色设置失败"
+      ],
+      "verify": [
+        "scene.get_summary 包含 Cube",
+        "scene.get_summary 包含材质或渲染设置变化"
+      ]
+    },
+    {
+      "id": "recipe.shader_glass_basic",
+      "task_type": "shader",
+      "title": "基础玻璃材质流程",
+      "steps": [
+        "shader_create_material(name)",
+        "shader_assign_material(object_name, material_name)",
+        "shader_set_node_input(Principled BSDF, Transmission Weight=1.0, IOR=1.45, Roughness=0.02)",
+        "shader_configure_eevee()"
+      ],
+      "common_errors": [
+        "EEVEE 下未开启 SSR/Refraction",
+        "材质未赋给目标对象"
+      ],
+      "verify": [
+        "shader_get_material_summary(material_name)"
+      ]
+    }
+  ]
+}

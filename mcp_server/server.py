@@ -5,10 +5,11 @@ Blender MCP Server - 从 Registry 自动生成工具列表
 """
 
 import asyncio
-import socket
 import json
 import sys
 import os
+import urllib.request
+import urllib.error
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -21,28 +22,24 @@ server = Server("blender-mcp")
 
 def send_to_blender(action: str, params: dict = None) -> dict:
     try:
-        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        client.settimeout(30.0)
-        client.connect(("127.0.0.1", 9876))
-
-        request = {"action": action, "params": params or {}}
-        client.send(json.dumps(request).encode("utf-8"))
-
-        chunks = []
-        while True:
-            try:
-                chunk = client.recv(65536)
-                if not chunk:
-                    break
-                chunks.append(chunk)
-            except socket.timeout:
-                break
-
-        client.close()
-        response = b"".join(chunks).decode("utf-8")
-        return json.loads(response)
-    except ConnectionRefusedError:
-        return {"success": False, "error": "无法连接 Blender，请确保插件已启动"}
+        payload = json.dumps(
+            {"tool": action, "args": params or {}},
+            ensure_ascii=False,
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            "http://127.0.0.1:9876/tool",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            body = resp.read().decode("utf-8")
+            data = json.loads(body)
+            if "success" not in data and "ok" in data:
+                data["success"] = bool(data.get("ok"))
+            return data
+    except urllib.error.URLError:
+        return {"success": False, "error": "无法连接 Blender HTTP 服务，请确认插件内已启动 MCP 服务器"}
     except Exception as e:
         return {"success": False, "error": str(e)}
 

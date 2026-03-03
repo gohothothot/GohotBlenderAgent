@@ -33,6 +33,7 @@ def _draw_health_badge(layout, state):
         pass
     layout.label(text=f"本轮路由判定: {state.last_route_hint or '-'}", icon="OUTLINER")
     layout.label(text=f"最近卡住原因: {state.last_stall_reason or '-'}", icon="INFO")
+    layout.label(text=f"Skill命中: {getattr(state, 'last_skill_matches', '-') or '-'}", icon="RNA")
     if int(getattr(state, "pseudo_fallback_hits", 0)) > 0:
         layout.label(text=f"伪调用兜底命中: {int(state.pseudo_fallback_hits)} 次", icon="INFO")
 
@@ -46,6 +47,7 @@ def _draw_quick_actions(layout, popup: bool = False):
         op_q.tier = "quick"
         op_f = row.operator("agent.run_smoke_tests", text="全测", icon="CHECKMARK")
         op_f.tier = "full"
+        row.operator("agent.run_backend_agent2_tests", text="A2测", icon="FILE_TICK")
         row.operator("agent.export_performance_report", text="", icon="EXPORT")
     else:
         row.operator("agent.open_chat", text="弹窗", icon="WINDOW")
@@ -54,6 +56,7 @@ def _draw_quick_actions(layout, popup: bool = False):
         op_q.tier = "quick"
         op_f = row.operator("agent.run_smoke_tests", text="全测", icon="CHECKMARK")
         op_f.tier = "full"
+        row.operator("agent.run_backend_agent2_tests", text="A2测", icon="FILE_TICK")
         row.operator("agent.export_performance_report", text="", icon="EXPORT")
 
 
@@ -84,7 +87,7 @@ def _draw_agent_mode_quick_switch(layout, prefs):
     row.label(text="执行模式:")
     op1 = row.operator("agent.set_agent_mode", text="Native", depress=(prefs.agent_mode == "native"))
     op1.mode = "native"
-    op2 = row.operator("agent.set_agent_mode", text="XML", depress=(prefs.agent_mode == "structured"))
+    op2 = row.operator("agent.set_agent_mode", text="Structured", depress=(prefs.agent_mode == "structured"))
     op2.mode = "structured"
     op3 = row.operator("agent.set_agent_mode", text="Plan", depress=(prefs.agent_mode == "orchestrator"))
     op3.mode = "orchestrator"

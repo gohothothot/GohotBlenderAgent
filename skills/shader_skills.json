@@ -1,0 +1,123 @@
+[
+  {
+    "id": "shader.create_material_basic",
+    "name": "Create and assign material",
+    "domain": "shader",
+    "intents": ["create", "modify", "shader", "shader_complex"],
+    "tags": ["material", "assign", "base"],
+    "description": "Create a material and assign to object.",
+    "tools": ["shader_create_material", "shader_assign_material", "shader_get_material_summary"],
+    "quality_hints": [
+      "新材质创建后先检查节点连线完整性，避免未连接到 Material Output。",
+      "赋材质后确认目标对象确实持有该材质。"
+    ],
+    "verify_tools": ["shader_get_material_summary", "scene_get_object_materials"]
+  },
+  {
+    "id": "shader.water_surface",
+    "name": "Water surface shader",
+    "domain": "shader",
+    "intents": ["shader", "shader_complex", "modify"],
+    "tags": ["water", "transmission", "ior", "fresnel"],
+    "description": "Build transmissive water-like surface with roughness/IOR tuning.",
+    "tools": ["shader_clear_nodes", "shader_batch_add_nodes", "shader_batch_link_nodes", "shader_set_node_input", "shader_get_material_summary", "shader_configure_eevee"],
+    "quality_hints": [
+      "水材质优先使用低粗糙度并配合 Fresnel/IOR（约 1.333）。",
+      "EEVEE 下透明折射需开启 SSR 与 Refraction。"
+    ],
+    "verify_tools": ["shader_get_material_summary", "scene_get_render_settings"]
+  },
+  {
+    "id": "shader.glass",
+    "name": "Glass shader",
+    "domain": "shader",
+    "intents": ["shader", "shader_complex", "modify"],
+    "tags": ["glass", "transparent", "refraction"],
+    "description": "Build clear glass with transmission and IOR.",
+    "tools": ["shader_clear_nodes", "shader_add_node", "shader_link_nodes", "shader_set_node_input", "shader_get_material_summary", "shader_configure_eevee"],
+    "quality_hints": [
+      "玻璃材质需保证 Transmission 接近 1，并设置合理 IOR（1.45 左右）。",
+      "避免无意义节点堆叠，优先保持链路简洁稳定。"
+    ],
+    "verify_tools": ["shader_get_material_summary", "scene_get_render_settings"]
+  },
+  {
+    "id": "shader.metal",
+    "name": "Metal shader tuning",
+    "domain": "shader",
+    "intents": ["shader", "modify"],
+    "tags": ["metal", "roughness", "specular"],
+    "description": "Tune metallic and roughness for metal appearance.",
+    "tools": ["set_metallic_roughness", "shader_get_material_summary", "shader_inspect_nodes"],
+    "quality_hints": [
+      "金属观感优先通过 metallic 与 roughness 的配合实现，不要只提亮 base color。"
+    ],
+    "verify_tools": ["shader_get_material_summary"]
+  },
+  {
+    "id": "shader.toon_chain",
+    "name": "Toon node chain",
+    "domain": "toon",
+    "intents": ["toon", "shader_complex", "modify"],
+    "tags": ["toon", "npr", "shader_to_rgb", "colorramp"],
+    "description": "Construct classic toon chain with ShaderToRGB and ColorRamp.",
+    "tools": ["shader_create_toon_material", "shader_convert_to_toon", "shader_get_material_summary"],
+    "quality_hints": [
+      "ColorRamp 建议使用 CONSTANT 插值以获得清晰分层。",
+      "尽量减少与 PBR 混用带来的风格冲突。"
+    ],
+    "verify_tools": ["shader_get_material_summary", "shader_inspect_nodes"]
+  },
+  {
+    "id": "shader.inspect_targeted",
+    "name": "Targeted node inspection",
+    "domain": "shader",
+    "intents": ["query", "shader", "shader_complex"],
+    "tags": ["inspect", "search", "nodes"],
+    "description": "Search node index then inspect selected nodes in detail.",
+    "tools": ["shader_get_material_summary", "shader_search_index", "shader_inspect_nodes", "shader_get_node_sockets"],
+    "quality_hints": [
+      "先摘要再细读，避免一次性读取过多节点值导致上下文噪音。"
+    ],
+    "verify_tools": ["shader_search_index", "shader_inspect_nodes"]
+  },
+  {
+    "id": "shader.cleanup_rewire",
+    "name": "Cleanup and rewire graph",
+    "domain": "shader",
+    "intents": ["modify", "shader", "shader_complex"],
+    "tags": ["cleanup", "rewire", "unlink"],
+    "description": "Remove wrong links/nodes and rebuild robust graph links.",
+    "tools": ["shader_unlink_nodes", "shader_delete_node", "shader_batch_link_nodes", "shader_link_nodes", "shader_get_material_summary"],
+    "quality_hints": [
+      "重连后必须验证输出链路闭合到 Material Output。"
+    ],
+    "verify_tools": ["shader_get_material_summary", "shader_inspect_nodes"]
+  },
+  {
+    "id": "shader.emission",
+    "name": "Emission material",
+    "domain": "shader",
+    "intents": ["create", "modify", "shader"],
+    "tags": ["emission", "light", "glow"],
+    "description": "Create/tune emission color and strength.",
+    "tools": ["shader_create_material", "shader_set_node_input", "shader_get_material_summary"],
+    "quality_hints": [
+      "发光强度调整应循序渐进，避免过曝或噪点。"
+    ],
+    "verify_tools": ["shader_get_material_summary"]
+  },
+  {
+    "id": "shader.procedural_base",
+    "name": "Procedural material base",
+    "domain": "shader",
+    "intents": ["create", "shader_complex"],
+    "tags": ["procedural", "noise", "voronoi"],
+    "description": "Start from procedural template and tune links/inputs.",
+    "tools": ["shader_create_procedural_material", "shader_inspect_nodes", "shader_set_node_input", "shader_get_material_summary"],
+    "quality_hints": [
+      "程序化材质优先控制关键参数，避免一次调太多节点导致不可控。"
+    ],
+    "verify_tools": ["shader_get_material_summary", "shader_search_index"]
+  }
+]

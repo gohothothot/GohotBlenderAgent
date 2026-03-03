@@ -10,6 +10,149 @@ import json
 from typing import Any
 from .core.tool_guard import precheck_tool_execution
 
+# 标准化别名工具（对外稳定接口）
+STANDARD_ALIAS_TOOLS = [
+    {
+        "name": "scene.get_summary",
+        "description": "获取场景摘要信息（标准别名）",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "object.create_cube",
+        "description": "创建立方体（size_m, location）",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "size_m": {"type": "number"},
+                "location": {"type": "array", "items": {"type": "number"}},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "object.create_plane",
+        "description": "创建平面（size_m, location）",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "size_m": {"type": "number"},
+                "location": {"type": "array", "items": {"type": "number"}},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "object.create_uv_sphere",
+        "description": "创建UV球（size_m, location）",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "size_m": {"type": "number"},
+                "location": {"type": "array", "items": {"type": "number"}},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "object.set_transform",
+        "description": "设置对象变换（location/rotation/scale）",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "object_name": {"type": "string"},
+                "location": {"type": "array", "items": {"type": "number"}},
+                "rotation": {"type": "array", "items": {"type": "number"}},
+                "scale": {"type": "array", "items": {"type": "number"}},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "object.add_modifier_bevel",
+        "description": "给对象添加 Bevel 修改器",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "object_name": {"type": "string"},
+                "name": {"type": "string"},
+                "width": {"type": "number"},
+                "segments": {"type": "integer"},
+            },
+            "required": ["object_name"],
+        },
+    },
+    {
+        "name": "object.add_subdivision_modifier",
+        "description": "给对象添加 Subdivision(SUBSURF) 修改器",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "object_name": {"type": "string"},
+                "name": {"type": "string"},
+                "levels": {"type": "integer"},
+                "render_levels": {"type": "integer"},
+            },
+            "required": ["object_name"],
+        },
+    },
+    {
+        "name": "material.create_principled",
+        "description": "创建/分配 Principled 材质",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "material_name": {"type": "string"},
+                "object_name": {"type": "string"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "material.set_base_color",
+        "description": "设置材质基础色",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "material_name": {"type": "string"},
+                "object_name": {"type": "string"},
+                "rgba": {"type": "array", "items": {"type": "number"}},
+                "color": {"type": "array", "items": {"type": "number"}},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "render.set_engine_cycles",
+        "description": "设置渲染引擎为 Cycles",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "render.set_resolution",
+        "description": "设置渲染分辨率",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "width": {"type": "integer"},
+                "height": {"type": "integer"},
+            },
+            "required": ["width", "height"],
+        },
+    },
+    {
+        "name": "render.render_still",
+        "description": "渲染静帧并保存",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "output_path": {"type": "string"},
+            },
+            "required": [],
+        },
+    },
+]
+
 # ========== 工具定义 ==========
 # Claude Tool Use 格式：每个工具有 name, description, input_schema
 
@@ -1119,6 +1262,12 @@ TOOLS = [
     },
 ]
 
+_existing_tool_names = {t.get("name") for t in TOOLS if isinstance(t, dict)}
+for _alias_tool in STANDARD_ALIAS_TOOLS:
+    if _alias_tool["name"] not in _existing_tool_names:
+        TOOLS.append(_alias_tool)
+        _existing_tool_names.add(_alias_tool["name"])
+
 
 _meshy_tasks = {}
 
@@ -1552,11 +1701,55 @@ def execute_tool(tool_name: str, arguments: dict) -> dict:
     返回格式: {"success": bool, "result": Any, "error": str|None}
     """
     try:
+        arguments = arguments or {}
         guarded = precheck_tool_execution(tool_name, arguments or {})
         if guarded is not None:
             return guarded
 
-        if tool_name == "list_objects":
+        if tool_name == "scene.get_summary":
+            return _get_scene_info_full()
+        elif tool_name in ("object.create_cube", "object.create_plane", "object.create_uv_sphere"):
+            size_m = arguments.get("size_m")
+            scale = None
+            if isinstance(size_m, (int, float)) and size_m > 0:
+                # primitive_* 默认边长/尺寸接近 2，因此用 size/2 近似映射为统一接口
+                uniform = float(size_m) / 2.0
+                scale = [uniform, uniform, uniform]
+            primitive_map = {
+                "object.create_cube": "cube",
+                "object.create_plane": "plane",
+                "object.create_uv_sphere": "sphere",
+            }
+            return _create_primitive(
+                primitive_type=primitive_map[tool_name],
+                location=arguments.get("location"),
+                scale=scale or arguments.get("scale"),
+            )
+        elif tool_name == "object.set_transform":
+            return _transform_object(
+                name=arguments.get("name") or arguments.get("object_name"),
+                location=arguments.get("location"),
+                rotation=arguments.get("rotation"),
+                scale=arguments.get("scale"),
+            )
+        elif tool_name == "object.add_modifier_bevel":
+            return _object_add_modifier_bevel(**arguments)
+        elif tool_name == "object.add_subdivision_modifier":
+            return _object_add_subdivision_modifier(**arguments)
+        elif tool_name == "material.create_principled":
+            return _material_create_principled(**arguments)
+        elif tool_name == "material.set_base_color":
+            return _material_set_base_color(**arguments)
+        elif tool_name == "render.set_engine_cycles":
+            return _setup_render(engine="cycles")
+        elif tool_name == "render.set_resolution":
+            return _setup_render(
+                resolution_x=arguments.get("width"),
+                resolution_y=arguments.get("height"),
+            )
+        elif tool_name == "render.render_still":
+            return _render_image(output_path=arguments.get("path") or arguments.get("output_path"))
+        elif tool_name == "list_objects":
             return _list_objects()
         elif tool_name == "create_primitive":
             return _create_primitive(**arguments)
@@ -1766,6 +1959,96 @@ def _set_material(object_name: str, color: list, material_name: str = None) -> d
         "result": f"已为 {object_name} 设置颜色 {color}",
         "error": None,
     }
+
+
+def _material_create_principled(material_name: str = None, object_name: str = None) -> dict:
+    target_name = object_name
+    if not target_name:
+        obj = bpy.context.active_object
+        if obj is None:
+            return {"success": False, "result": None, "error": "没有活动对象，无法创建并绑定材质"}
+        target_name = obj.name
+    return _set_material(
+        object_name=target_name,
+        color=[1.0, 1.0, 1.0, 1.0],
+        material_name=material_name,
+    )
+
+
+def _material_set_base_color(
+    material_name: str = None,
+    object_name: str = None,
+    rgba: list = None,
+    color: list = None,
+) -> dict:
+    target_name = object_name
+    if not target_name:
+        obj = bpy.context.active_object
+        if obj is None:
+            return {"success": False, "result": None, "error": "没有活动对象，无法设置材质颜色"}
+        target_name = obj.name
+    target_color = rgba or color or [1.0, 1.0, 1.0, 1.0]
+    return _set_material(
+        object_name=target_name,
+        color=target_color,
+        material_name=material_name,
+    )
+
+
+def _object_add_modifier_bevel(
+    object_name: str,
+    name: str = None,
+    width: float = None,
+    segments: int = None,
+    **kwargs,
+) -> dict:
+    try:
+        from . import scene_tools
+
+        params = {}
+        if width is not None:
+            params["width"] = width
+        if segments is not None:
+            params["segments"] = segments
+        for key in ("profile", "limit_method", "offset_type"):
+            if key in kwargs:
+                params[key] = kwargs[key]
+        return scene_tools.scene_add_modifier(
+            object_name=object_name,
+            modifier_type="BEVEL",
+            name=name,
+            **params,
+        )
+    except Exception as e:
+        return {"success": False, "result": None, "error": str(e)}
+
+
+def _object_add_subdivision_modifier(
+    object_name: str,
+    name: str = None,
+    levels: int = None,
+    render_levels: int = None,
+    **kwargs,
+) -> dict:
+    try:
+        from . import scene_tools
+
+        params = {}
+        if levels is not None:
+            params["levels"] = max(0, int(levels))
+        if render_levels is not None:
+            params["render_levels"] = max(0, int(render_levels))
+        for key in ("subdivision_type", "quality"):
+            if key in kwargs:
+                params[key] = kwargs[key]
+        return scene_tools.scene_add_modifier(
+            object_name=object_name,
+            modifier_type="SUBSURF",
+            name=name or "Subdivision",
+            **params,
+        )
+    except Exception as e:
+        return {"success": False, "result": None, "error": str(e)}
 
 
 def _set_metallic_roughness(

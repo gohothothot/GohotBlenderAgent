@@ -1,0 +1,373 @@
+{
+  "entries": [
+    {
+      "term": "Principled BSDF",
+      "aliases": [
+        "PBR",
+        "principled shader"
+      ],
+      "definition": "Blender 的物理渲染着色器，支持 Metallic/Roughness/Emission 等参数。",
+      "constraints": [
+        "只能在 Material Shader Editor 中使用",
+        "不能直接用于 World Shader"
+      ],
+      "blender_api": "bpy.types.ShaderNodeBsdfPrincipled"
+    },
+    {
+      "term": "Emission",
+      "aliases": [
+        "Emissive",
+        "发光"
+      ],
+      "definition": "用于让材质自发光，常与 Emission Strength 配合。",
+      "constraints": [
+        "强度过高会导致过曝"
+      ],
+      "blender_api": "bpy.types.ShaderNodeEmission"
+    },
+    {
+      "term": "Roughness",
+      "aliases": [
+        "粗糙度"
+      ],
+      "definition": "控制高光散射，值越低越镜面。",
+      "constraints": [
+        "推荐范围 0.0-1.0"
+      ],
+      "blender_api": "bpy.types.ShaderNodeBsdfPrincipled.inputs['Roughness']"
+    },
+    {
+      "term": "Metallic",
+      "aliases": [
+        "金属度"
+      ],
+      "definition": "控制材质金属属性，通常 0 或 1。",
+      "constraints": [
+        "非金属材质不建议高值"
+      ],
+      "blender_api": "bpy.types.ShaderNodeBsdfPrincipled.inputs['Metallic']"
+    },
+    {
+      "term": "IOR",
+      "aliases": [
+        "折射率"
+      ],
+      "definition": "控制折射行为，玻璃约 1.45，水约 1.333。",
+      "constraints": [
+        "仅在透射/折射场景明显"
+      ],
+      "blender_api": "bpy.types.ShaderNodeBsdfPrincipled.inputs['IOR']"
+    },
+    {
+      "term": "Normal Map",
+      "aliases": [
+        "法线贴图"
+      ],
+      "definition": "用纹理模拟细节法线变化。",
+      "constraints": [
+        "颜色空间应设为 Non-Color"
+      ],
+      "blender_api": "bpy.types.ShaderNodeNormalMap"
+    },
+    {
+      "term": "UV Map",
+      "aliases": [
+        "UV"
+      ],
+      "definition": "网格纹理坐标映射。",
+      "constraints": [
+        "贴图失真通常需要重新展开 UV"
+      ],
+      "blender_api": "bpy.types.Mesh.uv_layers"
+    },
+    {
+      "term": "Texture Coordinate",
+      "aliases": [
+        "纹理坐标节点"
+      ],
+      "definition": "提供 Generated/UV/Object 等坐标输出。",
+      "constraints": [
+        "不同坐标源效果差异较大"
+      ],
+      "blender_api": "bpy.types.ShaderNodeTexCoord"
+    },
+    {
+      "term": "Mapping",
+      "aliases": [
+        "映射节点"
+      ],
+      "definition": "用于平移/旋转/缩放纹理坐标。",
+      "constraints": [
+        "与 Texture Coordinate 节点配套使用"
+      ],
+      "blender_api": "bpy.types.ShaderNodeMapping"
+    },
+    {
+      "term": "ColorRamp",
+      "aliases": [
+        "色带"
+      ],
+      "definition": "将输入值映射到颜色区间。",
+      "constraints": [
+        "卡通风格常用 CONSTANT 插值"
+      ],
+      "blender_api": "bpy.types.ShaderNodeValToRGB"
+    },
+    {
+      "term": "Bump",
+      "aliases": [
+        "凹凸"
+      ],
+      "definition": "基于高度图模拟表面细节。",
+      "constraints": [
+        "强度过高会破坏观感"
+      ],
+      "blender_api": "bpy.types.ShaderNodeBump"
+    },
+    {
+      "term": "Displacement",
+      "aliases": [
+        "置换"
+      ],
+      "definition": "真实改变几何表面位移。",
+      "constraints": [
+        "需要足够网格细分"
+      ],
+      "blender_api": "bpy.types.ShaderNodeDisplacement"
+    },
+    {
+      "term": "Bevel Modifier",
+      "aliases": [
+        "倒角修改器",
+        "bevel"
+      ],
+      "definition": "为边缘增加倒角，提升硬表面真实感。",
+      "constraints": [
+        "宽度要匹配模型尺度"
+      ],
+      "blender_api": "bpy.types.BevelModifier"
+    },
+    {
+      "term": "Subdivision Surface",
+      "aliases": [
+        "Subsurf",
+        "细分曲面"
+      ],
+      "definition": "细分并平滑网格。",
+      "constraints": [
+        "渲染级别过高会影响性能"
+      ],
+      "blender_api": "bpy.types.SubsurfModifier"
+    },
+    {
+      "term": "Array Modifier",
+      "aliases": [
+        "阵列修改器"
+      ],
+      "definition": "复制对象形成规则阵列。",
+      "constraints": [
+        "注意相对偏移与数量"
+      ],
+      "blender_api": "bpy.types.ArrayModifier"
+    },
+    {
+      "term": "Mirror Modifier",
+      "aliases": [
+        "镜像修改器"
+      ],
+      "definition": "按轴镜像几何。",
+      "constraints": [
+        "常需启用 Clipping 防止裂缝"
+      ],
+      "blender_api": "bpy.types.MirrorModifier"
+    },
+    {
+      "term": "Boolean Modifier",
+      "aliases": [
+        "布尔修改器"
+      ],
+      "definition": "执行并/差/交布尔运算。",
+      "constraints": [
+        "网格拓扑不干净时易失败"
+      ],
+      "blender_api": "bpy.types.BooleanModifier"
+    },
+    {
+      "term": "Solidify Modifier",
+      "aliases": [
+        "实体化修改器"
+      ],
+      "definition": "给薄壳网格增加厚度。",
+      "constraints": [
+        "法线方向影响内外厚度"
+      ],
+      "blender_api": "bpy.types.SolidifyModifier"
+    },
+    {
+      "term": "Decimate Modifier",
+      "aliases": [
+        "简化修改器"
+      ],
+      "definition": "减少面数，优化性能。",
+      "constraints": [
+        "过度简化会损失形体"
+      ],
+      "blender_api": "bpy.types.DecimateModifier"
+    },
+    {
+      "term": "Shade Smooth",
+      "aliases": [
+        "平滑着色"
+      ],
+      "definition": "平滑面法线显示。",
+      "constraints": [
+        "硬边需要配合 Auto Smooth"
+      ],
+      "blender_api": "bpy.ops.object.shade_smooth"
+    },
+    {
+      "term": "Cycles",
+      "aliases": [
+        "路径追踪"
+      ],
+      "definition": "物理正确渲染引擎。",
+      "constraints": [
+        "质量高但速度较慢"
+      ],
+      "blender_api": "bpy.context.scene.render.engine='CYCLES'"
+    },
+    {
+      "term": "EEVEE",
+      "aliases": [
+        "实时渲染"
+      ],
+      "definition": "实时渲染引擎，交互快。",
+      "constraints": [
+        "某些效果需额外开关"
+      ],
+      "blender_api": "bpy.context.scene.render.engine='BLENDER_EEVEE'"
+    },
+    {
+      "term": "Sample Count",
+      "aliases": [
+        "采样数"
+      ],
+      "definition": "控制渲染噪点与时间。",
+      "constraints": [
+        "采样越高越慢"
+      ],
+      "blender_api": "bpy.types.CyclesRenderSettings.samples"
+    },
+    {
+      "term": "World Shader",
+      "aliases": [
+        "世界着色器"
+      ],
+      "definition": "控制环境光与背景。",
+      "constraints": [
+        "与材质节点树分离"
+      ],
+      "blender_api": "bpy.types.World.node_tree"
+    },
+    {
+      "term": "HDRI",
+      "aliases": [
+        "环境贴图"
+      ],
+      "definition": "用于环境光照与反射。",
+      "constraints": [
+        "注意强度与旋转"
+      ],
+      "blender_api": "bpy.types.ShaderNodeTexEnvironment"
+    },
+    {
+      "term": "Camera Focal Length",
+      "aliases": [
+        "焦距"
+      ],
+      "definition": "控制视角透视效果。",
+      "constraints": [
+        "单位 mm"
+      ],
+      "blender_api": "bpy.types.Camera.lens"
+    },
+    {
+      "term": "DOF",
+      "aliases": [
+        "景深"
+      ],
+      "definition": "模拟镜头景深。",
+      "constraints": [
+        "需设置对焦对象/距离"
+      ],
+      "blender_api": "bpy.types.Camera.dof"
+    },
+    {
+      "term": "FBX Export",
+      "aliases": [
+        "导出FBX"
+      ],
+      "definition": "常见 DCC 交换格式导出。",
+      "constraints": [
+        "注意坐标轴和缩放"
+      ],
+      "blender_api": "bpy.ops.export_scene.fbx"
+    },
+    {
+      "term": "glTF Export",
+      "aliases": [
+        "导出glTF",
+        "GLB"
+      ],
+      "definition": "实时引擎常用格式。",
+      "constraints": [
+        "材质兼容性需验证"
+      ],
+      "blender_api": "bpy.ops.export_scene.gltf"
+    },
+    {
+      "term": "Object Mode",
+      "aliases": [
+        "对象模式"
+      ],
+      "definition": "对象级编辑模式。",
+      "constraints": [
+        "许多操作仅在 Object Mode 可用"
+      ],
+      "blender_api": "bpy.ops.object.mode_set(mode='OBJECT')"
+    },
+    {
+      "term": "Edit Mode",
+      "aliases": [
+        "编辑模式"
+      ],
+      "definition": "网格顶点边面编辑模式。",
+      "constraints": [
+        "部分对象运算前需切回 Object Mode"
+      ],
+      "blender_api": "bpy.ops.object.mode_set(mode='EDIT')"
+    },
+    {
+      "term": "Geometry Nodes",
+      "aliases": [
+        "几何节点"
+      ],
+      "definition": "基于节点的程序化建模系统。",
+      "constraints": [
+        "依赖节点组输入输出定义"
+      ],
+      "blender_api": "bpy.types.GeometryNodeTree"
+    },
+    {
+      "term": "Compositor",
+      "aliases": [
+        "合成节点"
+      ],
+      "definition": "后期图像合成流程。",
+      "constraints": [
+        "与材质节点是不同树"
+      ],
+      "blender_api": "bpy.types.CompositorNodeTree"
+    }
+  ]
+}

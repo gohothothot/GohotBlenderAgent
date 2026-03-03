@@ -6,6 +6,7 @@ Plan Parser - 执行计划解析器
 
 import json
 import re
+import os
 from dataclasses import dataclass, field
 
 
@@ -17,6 +18,8 @@ class PlanStep:
     params: dict = field(default_factory=dict)
     description: str = ""
     depends_on: list = field(default_factory=list)
+    check: dict = field(default_factory=dict)
+    on_fail: dict = field(default_factory=dict)
 
     # 执行状态（由 Orchestrator 填充）
     status: str = "pending"  # pending | running | success | failed | skipped
@@ -108,6 +111,8 @@ def _parse_json_plan(text: str) -> ExecutionPlan | None:
             continue
         try:
             data = json.loads(match.group(1) if match.lastindex else match.group())
+            if not _validate_plan_schema(data):
+                continue
             return _json_to_plan(data)
         except (json.JSONDecodeError, KeyError, IndexError):
             continue
@@ -134,9 +139,11 @@ def _json_to_plan(data) -> ExecutionPlan:
             steps.append(PlanStep(
                 step=s.get("step", i + 1),
                 tool=s.get("tool", s.get("action", "")),
-                params=s.get("params", s.get("arguments", {})),
+                params=s.get("params", s.get("arguments", s.get("args", {}))),
                 description=s.get("description", s.get("desc", "")),
                 depends_on=s.get("depends_on", []),
+                check=s.get("check", {}) or {},
+                on_fail=s.get("on_fail", {}) or {},
             ))
 
     return ExecutionPlan(steps=steps, summary=summary, rollback_hint=rollback)
@@ -228,3 +235,28 @@ def _guess_tool_from_description(desc: str) -> str:
         if hint in desc_lower:
             return tool
     return ""
+
+
+def _validate_plan_schema(data) -> bool:
+    """
+    Optional jsonschema validation.
+    If jsonschema is unavailable, fallback to lightweight checks.
+    """
+    try:
+        from jsonschema import validate
+        root = os.path.dirname(os.path.dirname(__file__))
+        schema_path = os.path.join(root, "schemas", "plan.schema.json")
+        if not os.path.exists(schema_path):
+            return True
+        with open(schema_path, "r", encoding="utf-8") as f:
+            schema = json.load(f)
+        validate(instance=data, schema=schema)
+        return True
+    except Exception:
+        # lightweight fallback
+        if isinstance(data, list):
+            return len(data) > 0
+        if isinstance(data, dict):
+            steps = data.get("plan") or data.get("steps") or []
+            return isinstance(steps, list) and len(steps) > 0
+        return False

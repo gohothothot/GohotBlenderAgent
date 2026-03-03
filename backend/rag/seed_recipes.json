@@ -1,0 +1,170 @@
+{
+  "recipes": [
+    {
+      "task": "create_basic_mesh",
+      "description": "创建基础网格并设置位置尺度。",
+      "preconditions": [
+        "Object Mode"
+      ],
+      "steps": [
+        "object.create_cube(size_m, location)",
+        "object.set_transform(name/object_name, location/rotation/scale)"
+      ],
+      "common_errors": [
+        "对象命名不确定导致后续步骤找不到对象"
+      ],
+      "fix": "先 scene.get_summary 确认对象名称后再修改。",
+      "task_type": "modeling"
+    },
+    {
+      "task": "apply_modifier",
+      "description": "安全地应用修改器（避免多用户数据块报错）。",
+      "preconditions": [
+        "对象必须在 Object Mode",
+        "数据块不能有多个用户"
+      ],
+      "steps": [
+        "bpy.ops.object.mode_set(mode='OBJECT')",
+        "bpy.ops.object.modifier_apply(modifier=name)"
+      ],
+      "common_errors": [
+        "RuntimeError: Cannot apply to a multi-user: ..."
+      ],
+      "fix": "先调用 bpy.ops.object.make_single_user(object=True, obdata=True)。",
+      "task_type": "modeling"
+    },
+    {
+      "task": "bevel_hard_surface",
+      "description": "硬表面模型的倒角流程。",
+      "preconditions": [
+        "目标对象存在"
+      ],
+      "steps": [
+        "object.add_modifier_bevel(object_name, width, segments)",
+        "scene.get_summary 检查修改器生效"
+      ],
+      "common_errors": [
+        "width 过大导致模型破面"
+      ],
+      "fix": "按模型尺度减少 width，或提高 segments 并分步验证。",
+      "task_type": "modeling"
+    },
+    {
+      "task": "subdivision_smooth",
+      "description": "通过细分曲面提升平滑度。",
+      "preconditions": [
+        "目标对象存在"
+      ],
+      "steps": [
+        "object.add_subdivision_modifier(object_name, levels, render_levels)",
+        "scene.get_summary 验证修改器堆栈"
+      ],
+      "common_errors": [
+        "levels 过高导致性能骤降"
+      ],
+      "fix": "先用 levels=1~2 预览，再逐步提高。",
+      "task_type": "modeling"
+    },
+    {
+      "task": "assign_principled_material",
+      "description": "创建并赋予 Principled 材质。",
+      "preconditions": [
+        "对象已创建并可选中"
+      ],
+      "steps": [
+        "material.create_principled(material_name, object_name)",
+        "material.set_base_color(material_name/object_name, rgba)"
+      ],
+      "common_errors": [
+        "对象未绑定材质导致颜色设置无效"
+      ],
+      "fix": "先 create_principled，再 set_base_color。",
+      "task_type": "material"
+    },
+    {
+      "task": "emission_lookdev",
+      "description": "创建发光风格材质并进行亮度控制。",
+      "preconditions": [
+        "材质节点可编辑"
+      ],
+      "steps": [
+        "创建 Emission 节点",
+        "设置颜色与 Strength",
+        "与输出节点连接并验证"
+      ],
+      "common_errors": [
+        "强度过高导致严重过曝"
+      ],
+      "fix": "逐级提升 Strength（如 2 -> 5 -> 10）并观察。",
+      "task_type": "material"
+    },
+    {
+      "task": "render_cycles_still",
+      "description": "Cycles 静帧渲染标准流程。",
+      "preconditions": [
+        "场景对象与相机存在"
+      ],
+      "steps": [
+        "render.set_engine_cycles()",
+        "render.set_resolution(width, height)",
+        "render.render_still(path)"
+      ],
+      "common_errors": [
+        "输出路径不可写或为空"
+      ],
+      "fix": "改用绝对路径并确保目录可写。",
+      "task_type": "render"
+    },
+    {
+      "task": "eevee_preview_render",
+      "description": "EEVEE 快速预览渲染流程。",
+      "preconditions": [
+        "场景基础光照可用"
+      ],
+      "steps": [
+        "切换 EEVEE 引擎",
+        "降低采样和分辨率进行预览",
+        "确认效果后再高质量渲染"
+      ],
+      "common_errors": [
+        "透射/反射效果与预期不符"
+      ],
+      "fix": "检查 EEVEE 相关渲染开关（SSR/Refraction）。",
+      "task_type": "render"
+    },
+    {
+      "task": "export_fbx_pipeline",
+      "description": "导出 FBX 前的检查与导出流程。",
+      "preconditions": [
+        "对象尺度与朝向已统一"
+      ],
+      "steps": [
+        "应用变换",
+        "检查法线/材质",
+        "file.export_fbx(path)"
+      ],
+      "common_errors": [
+        "引擎中尺度不正确"
+      ],
+      "fix": "导出前统一单位与 Apply Scale。",
+      "task_type": "export"
+    },
+    {
+      "task": "export_gltf_pipeline",
+      "description": "导出 glTF/GLB 的兼容流程。",
+      "preconditions": [
+        "材质节点尽量使用兼容子集"
+      ],
+      "steps": [
+        "检查材质兼容",
+        "file.export_gltf(path)",
+        "目标引擎导入验证"
+      ],
+      "common_errors": [
+        "复杂节点在目标引擎表现异常"
+      ],
+      "fix": "改用 Principled + 贴图烘焙路径。",
+      "task_type": "export"
+    }
+  ]
+}

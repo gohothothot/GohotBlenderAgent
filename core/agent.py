@@ -37,6 +37,7 @@ from .safety_guard import (
 from .pseudo_tool_parser import extract_pseudo_tool_calls
 from .xml_parser import parse as parse_xml
 from .runtime_core import RuntimeCoreMixin
+from .skill_registry import select_tools_for_request, build_skill_guidance
 from ..context.vector_store import get_vector_store
 from ..ui.i18n import get_reply_language_hint
 
@@ -120,7 +121,7 @@ class BlenderAgent(RuntimeCoreMixin):
         if not self._tools:
             _log("WARNING: No tools loaded!")
 
-    def _get_tools(self, intent: str = "general") -> list:
+    def _get_tools(self, intent: str = "general", query: str = "", domain: str = "general") -> list:
         """获取工具列表（按意图筛选，保底返回全部）"""
         if not self._tools:
             self._load_tools()
@@ -130,6 +131,17 @@ class BlenderAgent(RuntimeCoreMixin):
             _log(f"Intent '{intent}' returned 0 tools, using all {len(self._tools)}")
             tools = self._tools
 
+        selected, matched_skill_ids = select_tools_for_request(
+            tools=tools,
+            query=query,
+            intent=intent,
+            domain=domain,
+            top_k=8,
+            max_tools=32,
+        )
+        if matched_skill_ids and len(selected) != len(tools):
+            _log(f"Skill-retrieved subset: {len(selected)}/{len(tools)} via {matched_skill_ids[:4]}")
+            tools = selected
         _log(f"Tools for intent '{intent}': {len(tools)}")
         return tools
 
@@ -172,12 +184,23 @@ class BlenderAgent(RuntimeCoreMixin):
             memory_hint = self._build_memory_hint(user_message, r.complexity)
 
             # 获取工具子集
-            tools = self._get_tools(r.intent)
+            tools = self._get_tools(r.intent, query=user_message, domain=r.domain)
+            skill_hint, matched_skill_ids = build_skill_guidance(
+                query=user_message,
+                intent=r.intent,
+                domain=r.domain,
+                top_k=5,
+            )
+            if matched_skill_ids:
+                try:
+                    self._fire_callback(self.on_plan, f"__SKILL_MATCH__:{json.dumps({'skills': matched_skill_ids}, ensure_ascii=False)}")
+                except Exception:
+                    pass
 
             # 构建消息
             domain_hint = DOMAIN_HINTS.get(r.domain, "")
             language_hint = get_reply_language_hint(user_message)
-            augmented = PREFLIGHT + user_message + domain_hint + memory_hint + language_hint
+            augmented = PREFLIGHT + user_message + domain_hint + memory_hint + ("\n" + skill_hint if skill_hint else "") + language_hint
             self.conversation_history.append({"role": "user", "content": augmented})
 
             # 裁剪历史

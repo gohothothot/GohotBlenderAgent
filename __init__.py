@@ -21,78 +21,109 @@ bl_info = {
 }
 
 import bpy
-import socket
 import threading
 import json
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
+MCP_WHITELIST_TOOLS = {
+    "scene.get_summary",
+    "object.create_cube",
+    "object.create_plane",
+    "object.create_uv_sphere",
+    "object.set_transform",
+    "object.add_modifier_bevel",
+    "object.add_subdivision_modifier",
+    "material.create_principled",
+    "material.set_base_color",
+    "render.set_engine_cycles",
+    "render.set_resolution",
+    "render.render_still",
+}
 
 
 class MCPBridgeServer:
     def __init__(self, host="127.0.0.1", port=9876):
         self.host = host
         self.port = port
-        self.server_socket = None
+        self.httpd = None
         self.running = False
         self.thread = None
 
     def start(self):
-        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.server_socket.bind((self.host, self.port))
-        self.server_socket.listen(1)
-        self.server_socket.settimeout(1.0)
+        parent = self
+
+        class _Handler(BaseHTTPRequestHandler):
+            def _reply(self, code: int, payload: dict):
+                body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self):  # noqa: N802
+                if self.path == "/health":
+                    self._reply(200, {"ok": True, "data": {"status": "running"}})
+                    return
+                self._reply(404, {"ok": False, "error": f"unknown path: {self.path}"})
+
+            def do_POST(self):  # noqa: N802
+                if self.path != "/tool":
+                    self._reply(404, {"ok": False, "error": f"unknown path: {self.path}"})
+                    return
+                try:
+                    content_len = int(self.headers.get("Content-Length", "0"))
+                    raw = self.rfile.read(content_len) if content_len > 0 else b"{}"
+                    req = json.loads(raw.decode("utf-8"))
+                    result = parent._execute_in_main_thread(req)
+                    code = 200 if result.get("ok", result.get("success")) else 400
+                    self._reply(code, result)
+                except Exception as e:
+                    self._reply(500, {"ok": False, "error": str(e), "logs": ["server_exception"]})
+
+            def log_message(self, format, *args):
+                return
+
+        self.httpd = ThreadingHTTPServer((self.host, self.port), _Handler)
         self.running = True
 
-        self.thread = threading.Thread(target=self._listen_loop)
+        self.thread = threading.Thread(target=self._serve_forever)
         self.thread.daemon = True
         self.thread.start()
-        print(f"[MCP Bridge] 服务器启动在 {self.host}:{self.port}")
+        print(f"[MCP Bridge] HTTP 服务器启动在 http://{self.host}:{self.port}")
 
     def stop(self):
         self.running = False
-        if self.server_socket:
-            self.server_socket.close()
+        if self.httpd:
+            try:
+                self.httpd.shutdown()
+                self.httpd.server_close()
+            except Exception:
+                pass
+            self.httpd = None
         print("[MCP Bridge] 服务器已停止")
 
-    def _listen_loop(self):
-        while self.running:
-            try:
-                client, addr = self.server_socket.accept()
-                print(f"[MCP Bridge] 客户端连接: {addr}")
-                self._handle_client(client)
-            except socket.timeout:
-                continue
-            except Exception as e:
-                if self.running:
-                    print(f"[MCP Bridge] 错误: {e}")
-
-    def _handle_client(self, client):
+    def _serve_forever(self):
         try:
-            chunks = []
-            while True:
-                try:
-                    chunk = client.recv(65536)
-                    if not chunk:
-                        break
-                    chunks.append(chunk)
-                    if len(chunk) < 65536:
-                        break
-                except socket.timeout:
-                    break
-            data = b"".join(chunks).decode("utf-8")
-            if data:
-                request = json.loads(data)
-                result = self._execute_in_main_thread(request)
-                response = json.dumps(result).encode("utf-8")
-                client.sendall(response)
+            if self.httpd:
+                self.httpd.serve_forever(poll_interval=0.5)
         except Exception as e:
-            error_response = {"success": False, "error": str(e)}
-            client.sendall(json.dumps(error_response).encode("utf-8"))
-        finally:
-            client.close()
+            if self.running:
+                print(f"[MCP Bridge] 错误: {e}")
 
     def _execute_in_main_thread(self, request):
-        action = request.get("action")
-        params = request.get("params", {})
+        action = request.get("tool") or request.get("action")
+        params = request.get("args") or request.get("params") or {}
+        if not action:
+            return {"ok": False, "success": False, "error": "缺少字段 tool/action", "logs": ["missing_tool"]}
+        if action not in MCP_WHITELIST_TOOLS:
+            return {
+                "ok": False,
+                "success": False,
+                "error": f"工具未在白名单中: {action}",
+                "logs": ["tool_not_whitelisted"],
+            }
 
         import queue
 
@@ -112,11 +143,23 @@ class MCPBridgeServer:
         try:
             result = result_queue.get(timeout=30.0)
             if result.get("success"):
-                return {"success": True, "data": result.get("result")}
+                return {
+                    "ok": True,
+                    "success": True,
+                    "data": result.get("result"),
+                    "error": None,
+                    "logs": [f"tool={action}"],
+                }
             else:
-                return {"success": False, "error": result.get("error")}
+                return {
+                    "ok": False,
+                    "success": False,
+                    "data": None,
+                    "error": result.get("error"),
+                    "logs": [f"tool={action}"],
+                }
         except Exception:
-            return {"success": False, "error": "操作超时"}
+            return {"ok": False, "success": False, "data": None, "error": "操作超时", "logs": [f"tool={action}", "timeout"]}
 
 
 _mcp_server = None
