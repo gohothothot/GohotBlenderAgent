@@ -188,8 +188,20 @@ def _build_performance_report_lines(max_sessions: int = 5) -> list:
             sid = log.get("session_id", "?")
             req = (log.get("user_request", "") or "").replace("\n", " ")[:80]
             brief = log.get("performance_brief", "无性能摘要")
+            summary = log.get("performance_summary", {}) or {}
+            grounding = summary.get("grounding", {}) or {}
             lines.append(f"[{sid}] {req}")
             lines.append(f"  {brief}")
+            if grounding:
+                miss_rate = round(float(grounding.get("miss_all_rate", 0) or 0) * 100, 1)
+                lines.append(
+                    "  Grounding: "
+                    f"match_events={int(grounding.get('match_events', 0) or 0)}, "
+                    f"turns={int(grounding.get('turns_with_grounding', 0) or 0)}, "
+                    f"miss_all={int(grounding.get('miss_all_turns', 0) or 0)} ({miss_rate}%), "
+                    f"avg_chain={grounding.get('avg_chain_len', 0)}, "
+                    f"avg_exec_unique={grounding.get('avg_executed_unique', 0)}"
+                )
             lines.append("")
         return lines
     except Exception as e:
@@ -266,18 +278,22 @@ class AGENT_OT_ExportPerformanceReport(Operator):
                     json.dump(payload, f, ensure_ascii=False, indent=2)
             else:
                 out_path = os.path.join(log_dir, f"performance_report_{ts}.csv")
-                header = "session_id,user_request,metric_events,prewarm_hit_rate,search_success_rate,avg_estimated_output_tokens\n"
+                header = "session_id,user_request,metric_events,prewarm_hit_rate,search_success_rate,avg_estimated_output_tokens,grounding_miss_all_rate,grounding_avg_chain_len,grounding_avg_executed_unique\n"
                 rows = [header]
                 for log in logs:
                     summary = log.get("performance_summary", {}) or {}
                     attach = summary.get("shader_context_attach", {}) or {}
                     search = summary.get("shader_search_index_result", {}) or {}
                     plan = summary.get("shader_read_plan", {}) or {}
+                    grounding = summary.get("grounding", {}) or {}
                     request = (log.get("user_request", "") or "").replace('"', "'").replace("\n", " ")[:120]
                     rows.append(
                         f"\"{log.get('session_id', '')}\",\"{request}\",{summary.get('metric_events', 0)},"
                         f"{attach.get('prewarm_hit_rate', 0)},{search.get('success_rate', 0)},"
-                        f"{plan.get('avg_estimated_output_tokens', 0)}\n"
+                        f"{plan.get('avg_estimated_output_tokens', 0)},"
+                        f"{grounding.get('miss_all_rate', 0)},"
+                        f"{grounding.get('avg_chain_len', 0)},"
+                        f"{grounding.get('avg_executed_unique', 0)}\n"
                     )
                 with open(out_path, "w", encoding="utf-8") as f:
                     f.writelines(rows)

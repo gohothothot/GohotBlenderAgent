@@ -32,9 +32,56 @@ from .state import (
     clear_pending_code,
     set_pending_plan,
     set_skill_matches,
+    set_grounding_matches,
+    record_grounding_tool_call,
 )
 from .chat_status import infer_route_hint_from_tool
 from .i18n import tr
+
+
+# ========== Metrics helpers ==========
+
+def _log_metric(metric_name: str, payload: dict):
+    try:
+        from .. import action_log
+        action_log.log_metric(metric_name, payload or {})
+    except Exception:
+        pass
+
+
+def _safe_json_dict(text: str) -> dict:
+    try:
+        obj = json.loads(text or "{}")
+        return obj if isinstance(obj, dict) else {}
+    except Exception:
+        return {}
+
+
+def _emit_grounding_quality_metric(state, stage: str):
+    chain_text = (getattr(state, "last_grounding_tools", "") or "").strip()
+    if not chain_text or chain_text == "-":
+        _log_metric("grounding_quality", {"stage": stage, "has_grounding": False})
+        return
+    chain = [x.strip() for x in chain_text.split("->") if x.strip()]
+    counts = _safe_json_dict(getattr(state, "agent_grounding_exec_counts_json", "{}"))
+    executed_unique = sum(1 for n in chain if int(counts.get(n, 0) or 0) > 0)
+    total_exec = sum(int(counts.get(n, 0) or 0) for n in chain)
+    chain_len = len(chain)
+    hit_rate = (executed_unique / chain_len) if chain_len else 0.0
+    _log_metric(
+        "grounding_quality",
+        {
+            "stage": stage,
+            "has_grounding": True,
+            "chain_len": chain_len,
+            "executed_unique": executed_unique,
+            "total_exec": total_exec,
+            "hit_rate": round(hit_rate, 4),
+            "miss_all": bool(executed_unique == 0),
+            "status": getattr(state, "last_exec_status", ""),
+            "stall_reason": getattr(state, "last_stall_reason", ""),
+        },
+    )
 
 
 # ========== Agent instance management ==========
@@ -164,6 +211,10 @@ def _send_message_with_mode(user_msg: str, mode: str):
     state = _get_state()
     set_processing(True, channel="agent")
     state.last_exec_mode = mode
+    state.last_grounding_caps = "-"
+    state.last_grounding_tools = "-"
+    state.last_grounding_exec = "-"
+    state.agent_grounding_exec_counts_json = "{}"
     agent.send_message(user_msg)
     return True
 
@@ -186,6 +237,10 @@ def _send_prompt_to_agent(prompt: str) -> bool:
     state.last_exec_mode = prefs.agent_mode
     state.last_route_hint = "测试修复"
     state.pseudo_fallback_hits = 0
+    state.last_grounding_caps = "-"
+    state.last_grounding_tools = "-"
+    state.last_grounding_exec = "-"
+    state.agent_grounding_exec_counts_json = "{}"
     state.continuation_notice_shown = False
     state.continuation_started_at = 0.0
     state.last_stall_reason = "-"
@@ -309,6 +364,7 @@ def _on_agent_message(role: str, content: str):
     set_processing(False, channel="agent")
     state.continuation_started_at = 0.0
     state.last_stall_reason = "-"
+    _emit_grounding_quality_metric(state, stage="assistant_final")
     if role == "assistant" and state.smoke_autofix_active:
         try:
             from .smoke_runner import _autofix_verify_and_advance
@@ -329,6 +385,7 @@ def _on_tool_call(tool_name: str, args: dict):
     else:
         shown_name = tool_name
     state.last_route_hint = infer_route_hint_from_tool(shown_name)
+    record_grounding_tool_call(shown_name, channel="agent")
     args_preview = json.dumps(args, ensure_ascii=False)[:200] if args else ""
     _add_message("system", f"🔧 调用工具: {shown_name}\n{args_preview}", channel="agent")
 
@@ -343,6 +400,29 @@ def _on_plan(plan_text: str):
             if isinstance(skills, list):
                 set_skill_matches([str(s) for s in skills], channel="agent")
                 _add_message("system", f"🧩 Skill命中: {', '.join([str(s) for s in skills[:6]])}", channel="agent")
+                return
+        except Exception:
+            pass
+    if isinstance(plan_text, str) and plan_text.startswith("__GROUNDING__:"):
+        raw = plan_text[len("__GROUNDING__:"):]
+        try:
+            payload = json.loads(raw)
+            caps = payload.get("capabilities") or []
+            chain = payload.get("tool_chain") or []
+            if isinstance(caps, list) and isinstance(chain, list):
+                set_grounding_matches([str(x) for x in caps], [str(x) for x in chain], channel="agent")
+                cap_txt = ", ".join([str(x) for x in caps[:6]]) if caps else "-"
+                chain_txt = " -> ".join([str(x) for x in chain[:6]]) if chain else "-"
+                _add_message("system", f"🧭 Grounding命中: {cap_txt}\n🔗 {chain_txt}", channel="agent")
+                _log_metric(
+                    "grounding_match",
+                    {
+                        "capability_count": len(caps),
+                        "tool_chain_len": len(chain),
+                        "capabilities": [str(x) for x in caps[:8]],
+                        "tool_chain": [str(x) for x in chain[:12]],
+                    },
+                )
                 return
         except Exception:
             pass
@@ -427,10 +507,12 @@ def _on_error(error: str):
         state.last_exec_status = "no_toolcall"
         state.last_stall_reason = "无工具调用"
     elif wrong_toolset_error:
+        state.last_exec_status = "error"
         state.last_stall_reason = "工具集漂移"
     else:
         state.last_exec_status = "error_after_toolcall" if state.request_had_tool_call else "error"
         state.last_stall_reason = "一般错误"
+    _emit_grounding_quality_metric(state, stage="error")
     if state.smoke_autofix_active:
         try:
             from .smoke_runner import _autofix_send_next

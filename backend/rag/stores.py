@@ -13,6 +13,14 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
+try:
+    from .doc_index import SkillCapabilityStore
+except Exception:
+    try:
+        from backend.rag.doc_index import SkillCapabilityStore  # type: ignore
+    except Exception:
+        SkillCapabilityStore = None  # type: ignore
+
 
 MAX_RAG_CHARS = int(os.getenv("MAX_RAG_CHARS", "1200"))
 
@@ -254,7 +262,7 @@ class RecipeStore:
         return [x[1] for x in scored[: max(1, int(top_k))]]
 
 
-def _build_context_block(glossary_hits: list[dict], recipe_hits: list[dict], max_chars: int) -> str:
+def _build_context_block(glossary_hits: list[dict], recipe_hits: list[dict], capability_hits: list[dict], max_chars: int) -> str:
     lines: list[str] = []
     if glossary_hits:
         lines.append("[Glossary]")
@@ -268,6 +276,14 @@ def _build_context_block(glossary_hits: list[dict], recipe_hits: list[dict], max
             steps = " -> ".join((r.get("steps", []) or [])[:4])
             lines.append(
                 f"- {r.get('task','')}: {r.get('description','')} | steps: {steps} | fix: {r.get('fix','')}"
+            )
+    if capability_hits:
+        lines.append("[Capabilities]")
+        for c in capability_hits:
+            chain = " -> ".join((c.get("tool_chain", []) or [])[:6])
+            gate = "; ".join((c.get("quality_gate", []) or [])[:2])
+            lines.append(
+                f"- {c.get('skill_id','')}: chain={chain} | gate={gate}"
             )
     block = "\n".join(lines).strip()
     if len(block) <= max_chars:
@@ -285,6 +301,7 @@ def auto_retrieve(
 ) -> dict[str, Any]:
     glossary = GlossaryStore.create()
     recipes = RecipeStore.create()
+    capabilities = SkillCapabilityStore.create() if SkillCapabilityStore else None
 
     terms = list(extracted_terms or [])
     if normalized_instruction:
@@ -298,14 +315,17 @@ def auto_retrieve(
 
     g_hits = glossary.retrieve(terms, top_k=top_k_glossary)
     r_hits = recipes.retrieve(task_type=task_type, extracted_terms=terms, top_k=top_k_recipe)
-    context_text = _build_context_block(g_hits, r_hits, max_chars=max_chars)
+    c_hits = capabilities.retrieve(task_type=task_type, terms=terms, top_k=6) if capabilities else []
+    context_text = _build_context_block(g_hits, r_hits, c_hits, max_chars=max_chars)
     return {
         "glossary_hits": g_hits,
         "recipe_hits": r_hits,
+        "capability_hits": c_hits,
         "context_text": context_text,
         "meta": {
             "glossary_count": len(g_hits),
             "recipe_count": len(r_hits),
+            "capability_count": len(c_hits),
             "max_chars": max_chars,
         },
     }

@@ -120,8 +120,14 @@ class AgentOrchestrator(RuntimeCoreMixin):
             rag_meta = prep.get("rag_meta", {})
             memory_hits = prep.get("memory_hits", 0)
             enriched_message = prep.get("enriched_message", normalized)
+            capability_tool_chain = prep.get("capability_tool_chain", [])
+            capability_ids = prep.get("capability_ids", [])
             self._last_normalized = normalized
             self._last_task_type = task_type
+            try:
+                self._executor.set_grounding_tools(capability_tool_chain)
+            except Exception:
+                pass
 
             if self.on_plan:
                 self._fire_callback(
@@ -129,10 +135,16 @@ class AgentOrchestrator(RuntimeCoreMixin):
                     (
                         f"[Mini改写] {normalized}\n"
                         f"[RAG命中] glossary={rag_meta.get('glossary_count', 0)}, "
-                        f"recipe={rag_meta.get('recipe_count', 0)}\n"
+                        f"recipe={rag_meta.get('recipe_count', 0)}, "
+                        f"capability={rag_meta.get('capability_count', 0)}\n"
                         f"[Memory命中] {memory_hits}"
                     ),
                 )
+                if capability_tool_chain:
+                    self._fire_callback(
+                        self.on_plan,
+                        f"__GROUNDING__:{json.dumps({'capabilities': capability_ids, 'tool_chain': capability_tool_chain}, ensure_ascii=False)}",
+                    )
 
             _log(f"Routing: {normalized[:60]}...")
             route = self._router.route(normalized)
@@ -161,7 +173,12 @@ class AgentOrchestrator(RuntimeCoreMixin):
 
             if route.is_complex:
                 _log("→ _process_complex")
-                self._process_complex(enriched_message, route, raw_user_message=user_message)
+                self._process_complex(
+                    enriched_message,
+                    route,
+                    raw_user_message=user_message,
+                    capability_tool_chain=capability_tool_chain,
+                )
             else:
                 _log("→ _process_simple")
                 self._process_simple(enriched_message, route, raw_user_message=user_message)
@@ -233,7 +250,13 @@ class AgentOrchestrator(RuntimeCoreMixin):
 
         self._end_session(result.get("result", ""))
 
-    def _process_complex(self, user_message: str, route, raw_user_message: str = ""):
+    def _process_complex(
+        self,
+        user_message: str,
+        route,
+        raw_user_message: str = "",
+        capability_tool_chain: list[str] | None = None,
+    ):
         prewarm_thread = None
         if route.domain == "shader":
             _log("Starting shader prewarm in parallel with planning")
@@ -247,6 +270,12 @@ class AgentOrchestrator(RuntimeCoreMixin):
         _log(f"Planning: intent={route.intent}")
         plan = self._planner.plan(user_message, route.intent)
         _log(f"Plan result: {plan.total_steps} steps, summary={plan.summary[:80] if plan.summary else 'N/A'}")
+        plan = self._enforce_capability_tool_grounding(
+            plan=plan,
+            raw_user_message=raw_user_message or user_message,
+            route=route,
+            capability_tool_chain=capability_tool_chain or [],
+        )
 
         if prewarm_thread:
             prewarm_thread.join(timeout=2.0)
@@ -311,6 +340,79 @@ class AgentOrchestrator(RuntimeCoreMixin):
         self._last_task_success = len(plan.failed_steps) == 0
         self._emit_message("assistant", final_text)
         self._end_session(final_text)
+
+    def _enforce_capability_tool_grounding(self, plan, raw_user_message: str, route, capability_tool_chain: list[str]):
+        """
+        Plan 级工具约束：
+        1) 若计划使用了 capability 工具链之外的工具，先做一次带约束重规划。
+        2) 若仍有越界工具，则剔除越界步骤（保留无 tool 的描述步骤）。
+        """
+        if not capability_tool_chain:
+            return plan
+        allow = set(capability_tool_chain)
+        allow.update({"get_scene_info", "scene.get_summary", "get_object_info", "gn_get_summary"})
+
+        def _invalid_tools(cur_plan):
+            bad = []
+            for s in (cur_plan.steps or []):
+                tool_name = str(getattr(s, "tool", "") or "").strip()
+                if tool_name and tool_name not in allow:
+                    bad.append(tool_name)
+            return sorted(set(bad))
+
+        invalid = _invalid_tools(plan)
+        if not invalid:
+            return plan
+
+        if self.on_plan:
+            self._fire_callback(
+                self.on_plan,
+                "⚠️ 计划工具超出 grounding 范围，触发一次约束重规划："
+                + ", ".join(invalid[:8]),
+            )
+
+        constrained_prompt = (
+            f"{raw_user_message}\n\n"
+            "[计划约束]\n"
+            "每一步 tool 必须从以下列表中选择：\n- "
+            + "\n- ".join(capability_tool_chain[:20])
+            + "\n可选验证工具：get_scene_info, scene.get_summary, get_object_info, gn_get_summary\n"
+            "若无法完成，请把 tool 留空并在 description 写明缺失能力，不要编造工具名。"
+        )
+        try:
+            replanned = self._planner.plan(constrained_prompt, route.intent)
+            invalid2 = _invalid_tools(replanned)
+            if replanned.steps and not invalid2:
+                if self.on_plan:
+                    self._fire_callback(self.on_plan, "✅ 约束重规划成功，已切换到 grounded 计划。")
+                return replanned
+            if self.on_plan and replanned.steps:
+                self._fire_callback(
+                    self.on_plan,
+                    "⚠️ 重规划仍含越界工具，执行前自动剔除："
+                    + ", ".join(invalid2[:8]),
+                )
+            # 最终兜底：剔除越界工具步骤，保留空工具描述步骤
+            safe_steps = []
+            for s in (replanned.steps or plan.steps or []):
+                tool_name = str(getattr(s, "tool", "") or "").strip()
+                if (not tool_name) or tool_name in allow:
+                    safe_steps.append(s)
+            if safe_steps:
+                replanned.steps = safe_steps
+                return replanned
+        except Exception as e:
+            _log(f"grounded replanning failed: {e}")
+
+        # 回退：使用原计划中可执行的安全步骤
+        safe_steps = []
+        for s in (plan.steps or []):
+            tool_name = str(getattr(s, "tool", "") or "").strip()
+            if (not tool_name) or tool_name in allow:
+                safe_steps.append(s)
+        if safe_steps:
+            plan.steps = safe_steps
+        return plan
 
     def _execute_plan_step_with_policy(self, step, route, prev_summary: str, user_message: str) -> dict:
         on_fail = step.on_fail or {}
@@ -457,9 +559,11 @@ class AgentOrchestrator(RuntimeCoreMixin):
         normalized = user_message
         extracted_terms = []
         task_type = "general"
-        rag_meta = {"glossary_count": 0, "recipe_count": 0}
+        rag_meta = {"glossary_count": 0, "recipe_count": 0, "capability_count": 0}
         memory_hits = 0
         enriched_message = user_message
+        capability_tool_chain = []
+        capability_ids = []
 
         # Backend 2.0 path
         if self._mini_rewriter and auto_retrieve:
@@ -476,6 +580,14 @@ class AgentOrchestrator(RuntimeCoreMixin):
                 )
                 rag_text = rag.get("context_text", "")
                 rag_meta = rag.get("meta", rag_meta) or rag_meta
+                for cap in (rag.get("capability_hits", []) or []):
+                    sid = str(cap.get("skill_id", "")).strip()
+                    if sid and sid not in capability_ids:
+                        capability_ids.append(sid)
+                    for tool_name in (cap.get("tool_chain", []) or []):
+                        tn = str(tool_name).strip()
+                        if tn and tn not in capability_tool_chain:
+                            capability_tool_chain.append(tn)
 
                 mem_results = []
                 if self._memory_store:
@@ -515,6 +627,8 @@ class AgentOrchestrator(RuntimeCoreMixin):
                     "rag_meta": rag_meta,
                     "memory_hits": memory_hits,
                     "enriched_message": enriched_message,
+                    "capability_tool_chain": capability_tool_chain,
+                    "capability_ids": capability_ids,
                 }
             except Exception as e:
                 _log(f"backend v2 preprocess failed, fallback legacy: {e}")
@@ -540,6 +654,8 @@ class AgentOrchestrator(RuntimeCoreMixin):
             "rag_meta": rag_meta,
             "memory_hits": memory_hits,
             "enriched_message": enriched_message,
+            "capability_tool_chain": capability_tool_chain,
+            "capability_ids": capability_ids,
         }
 
     def _on_pre_compression_deep_sleep(self, payload: dict):

@@ -5,6 +5,7 @@ Centralises all bpy PropertyGroup classes so they can be imported and
 registered independently of the main chat_ui module.
 """
 
+import json
 import bpy
 from bpy.props import (
     StringProperty,
@@ -75,6 +76,17 @@ class AgentState(PropertyGroup):
     last_skill_matches: StringProperty(name="Last Skill Matches", default="-")
     agent_last_skill_matches: StringProperty(name="Agent Last Skill Matches", default="-")
     meshy_last_skill_matches: StringProperty(name="Meshy Last Skill Matches", default="-")
+    last_grounding_caps: StringProperty(name="Last Grounding Caps", default="-")
+    agent_last_grounding_caps: StringProperty(name="Agent Last Grounding Caps", default="-")
+    meshy_last_grounding_caps: StringProperty(name="Meshy Last Grounding Caps", default="-")
+    last_grounding_tools: StringProperty(name="Last Grounding Tools", default="-")
+    agent_last_grounding_tools: StringProperty(name="Agent Last Grounding Tools", default="-")
+    meshy_last_grounding_tools: StringProperty(name="Meshy Last Grounding Tools", default="-")
+    last_grounding_exec: StringProperty(name="Last Grounding Exec", default="-")
+    agent_last_grounding_exec: StringProperty(name="Agent Last Grounding Exec", default="-")
+    meshy_last_grounding_exec: StringProperty(name="Meshy Last Grounding Exec", default="-")
+    agent_grounding_exec_counts_json: StringProperty(name="Agent Grounding Exec Counts JSON", default="{}")
+    meshy_grounding_exec_counts_json: StringProperty(name="Meshy Grounding Exec Counts JSON", default="{}")
     fallback_attempted: BoolProperty(name="Fallback Attempted", default=False)
     request_had_tool_call: BoolProperty(name="Request Had Tool Call", default=False)
     pseudo_fallback_hits: IntProperty(name="Pseudo Fallback Hits", default=0)
@@ -246,6 +258,54 @@ def set_skill_matches(skill_ids: list[str], channel: str = "agent"):
     setattr(state, f"{prefix}_last_skill_matches", text)
     if prefix == "agent":
         state.last_skill_matches = text
+
+
+def set_grounding_matches(capability_ids: list[str], tool_chain: list[str], channel: str = "agent"):
+    state = _get_state()
+    prefix = _channel_prefix(channel)
+    cap_text = ", ".join([str(x) for x in (capability_ids or [])[:6]]) if capability_ids else "-"
+    tool_text = " -> ".join([str(x) for x in (tool_chain or [])[:6]]) if tool_chain else "-"
+    setattr(state, f"{prefix}_last_grounding_caps", cap_text)
+    setattr(state, f"{prefix}_last_grounding_tools", tool_text)
+    setattr(state, f"{prefix}_grounding_exec_counts_json", "{}")
+    setattr(state, f"{prefix}_last_grounding_exec", "-")
+    if prefix == "agent":
+        state.last_grounding_caps = cap_text
+        state.last_grounding_tools = tool_text
+        state.last_grounding_exec = "-"
+
+
+def record_grounding_tool_call(tool_name: str, channel: str = "agent"):
+    state = _get_state()
+    prefix = _channel_prefix(channel)
+    chain_text = getattr(state, f"{prefix}_last_grounding_tools", "") or ""
+    if not chain_text or chain_text == "-":
+        return
+    chain = [x.strip() for x in chain_text.split("->") if x.strip()]
+    if not chain:
+        return
+    tname = str(tool_name or "").strip()
+    if tname not in chain:
+        return
+    counts_attr = f"{prefix}_grounding_exec_counts_json"
+    counts_raw = getattr(state, counts_attr, "{}") or "{}"
+    try:
+        counts = json.loads(counts_raw)
+        if not isinstance(counts, dict):
+            counts = {}
+    except Exception:
+        counts = {}
+    counts[tname] = int(counts.get(tname, 0)) + 1
+    setattr(state, counts_attr, json.dumps(counts, ensure_ascii=False))
+    parts = []
+    for n in chain[:6]:
+        c = int(counts.get(n, 0))
+        if c > 0:
+            parts.append(f"{n}({c})")
+    text = " -> ".join(parts) if parts else "-"
+    setattr(state, f"{prefix}_last_grounding_exec", text)
+    if prefix == "agent":
+        state.last_grounding_exec = text
 
 
 def _add_message(role: str, content: str, is_code: bool = False, channel: str = "auto"):

@@ -41,6 +41,33 @@ _STANDARD_TOOL_PRIORITY = [
     "render.set_engine_cycles",
     "render.set_resolution",
     "render.render_still",
+    "controller_create_empty",
+    "controller_add_copy_location",
+    "controller_add_copy_rotation",
+    "controller_add_copy_scale",
+    "controller_add_track_to",
+    "controller_add_custom_property",
+    "controller_add_child_of",
+    "controller_set_constraint_influence",
+    "controller_remove_constraint",
+    "object_rename",
+    "object_select_set_active",
+    "object_duplicate_linked",
+    "scene_apply_modifier",
+    "scene_set_frame_range",
+    "scene_set_current_frame",
+    "scene_save_blend",
+    "scene_export_fbx",
+    "scene_export_gltf",
+    "gn_create_modifier",
+    "gn_add_node",
+    "gn_link_nodes",
+    "gn_set_input_default",
+    "gn_expose_group_input",
+    "gn_get_summary",
+    "gn_remove_node",
+    "gn_auto_layout_nodes",
+    "gn_find_node_by_type",
 ]
 
 
@@ -54,6 +81,15 @@ class ExecutorAgent:
         self._shader_prewarm_lock = threading.Lock()
         self.on_tool_call = None
         self.on_plan = None
+        self._grounding_tool_chain = []
+
+    def set_grounding_tools(self, tool_chain: list[str] | None):
+        chain = []
+        for t in (tool_chain or []):
+            ts = str(t).strip()
+            if ts and ts not in chain:
+                chain.append(ts)
+        self._grounding_tool_chain = chain
 
     def prewarm_shader_context(self, user_message: str):
         """后台预热 shader 读取上下文，供后续执行阶段复用"""
@@ -111,6 +147,7 @@ class ExecutorAgent:
         if matched_skill_ids and len(selected) != len(tool_schemas):
             _log(f"Skill-retrieved subset(simple): {len(selected)}/{len(tool_schemas)} via {matched_skill_ids[:4]}")
             tool_schemas = selected
+        tool_schemas = self._apply_capability_grounding(tool_schemas)
         _log(f"execute_simple: domain={domain}, intent={intent}, tools_count={len(tools)}, registry_total={registry.count}")
 
         system = AgentPrompts.get_executor_prompt(domain)
@@ -128,6 +165,17 @@ class ExecutorAgent:
         # 强化工具使用指令（白名单优先 + 禁止脚本）
         preflight = self._build_tool_preflight_hint()
         messages = [{"role": "user", "content": preflight + user_message + (("\n" + skill_hint) if skill_hint else "")}]
+        if self._grounding_tool_chain:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "[Capability Grounding]\n"
+                        "优先从以下工具链中选择工具并按链路执行：\n- "
+                        + "\n- ".join(self._grounding_tool_chain[:12])
+                    ),
+                }
+            )
         if domain == "shader":
             shader_ctx = self._consume_shader_prewarm_context()
             ctx_source = "prewarm_cache"
@@ -191,6 +239,7 @@ class ExecutorAgent:
         if matched_skill_ids and len(selected) != len(tool_schemas):
             _log(f"Skill-retrieved subset(step): {len(selected)}/{len(tool_schemas)} via {matched_skill_ids[:4]}")
             tool_schemas = selected
+        tool_schemas = self._apply_capability_grounding(tool_schemas)
 
         system = AgentPrompts.get_executor_prompt(domain)
         ctx = ContextManager()
@@ -211,6 +260,17 @@ class ExecutorAgent:
                 pass
         if skill_hint:
             messages.append({"role": "user", "content": skill_hint})
+        if self._grounding_tool_chain:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "[Capability Grounding]\n"
+                        "优先工具链（按顺序）：\n- "
+                        + "\n- ".join(self._grounding_tool_chain[:12])
+                    ),
+                }
+            )
         if domain == "shader":
             shader_ctx = self._consume_shader_prewarm_context()
             ctx_source = "prewarm_cache"
@@ -414,6 +474,35 @@ class ExecutorAgent:
         except Exception:
             pass
 
+    def _apply_capability_grounding(self, tool_schemas: list) -> list:
+        """
+        基于 capability 检索结果对工具集合做收敛：
+        - 优先保留 tool_chain 中的工具
+        - 保留少量验证/查询工具，避免不可验证
+        - 若收敛结果过小则回退原集合
+        """
+        if not self._grounding_tool_chain or not tool_schemas:
+            return tool_schemas
+        chain_set = set(self._grounding_tool_chain)
+        keep_verify = {"get_scene_info", "scene.get_summary", "get_object_info", "gn_get_summary"}
+        chosen = [
+            t for t in tool_schemas
+            if isinstance(t, dict) and (t.get("name") in chain_set or t.get("name") in keep_verify)
+        ]
+        if len(chosen) < 3:
+            return tool_schemas
+        # 按 capability 链路顺序重排
+        name_to_schema = {t.get("name"): t for t in chosen if isinstance(t, dict)}
+        ordered = []
+        for n in self._grounding_tool_chain:
+            if n in name_to_schema:
+                ordered.append(name_to_schema[n])
+        for n in sorted(keep_verify):
+            if n in name_to_schema and name_to_schema[n] not in ordered:
+                ordered.append(name_to_schema[n])
+        _log(f"Capability grounding applied: {len(ordered)}/{len(tool_schemas)} tools")
+        return ordered or tool_schemas
+
     @staticmethod
     def _build_tool_preflight_hint() -> str:
         ordered = ", ".join(_STANDARD_TOOL_PRIORITY)
@@ -424,5 +513,7 @@ class ExecutorAgent:
             "- 优先使用标准白名单工具名，不要使用旧别名。\n"
             f"- 推荐优先序：{ordered}\n"
             "- 涉及细分曲面时，优先用 object.add_subdivision_modifier。"
+            "\n- 涉及控制器/约束时，优先用 controller_* 工具。"
+            "\n- 涉及几何节点时，按 gn_create_modifier -> gn_add_node -> gn_link_nodes -> gn_get_summary 的链路逐步执行。"
             "\n\n"
         )

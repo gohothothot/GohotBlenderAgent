@@ -51,6 +51,8 @@ class TestBackendAgent2Basics(unittest.TestCase):
         )
         self.assertIn("context_text", rr)
         self.assertIn("meta", rr)
+        self.assertIn("capability_hits", rr)
+        self.assertIn("capability_count", rr.get("meta", {}))
         self.assertLessEqual(len(rr.get("context_text", "")), int(rr.get("meta", {}).get("max_chars", 1200)) + 64)
 
     def test_token_optimizer_deep_sleep_hook(self):

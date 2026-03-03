@@ -45,8 +45,14 @@ from .safety_guard import (
 from .pseudo_tool_parser import extract_pseudo_tool_calls
 from .runtime_core import RuntimeCoreMixin
 from .skill_registry import select_tools_for_request, build_skill_guidance
+from .mini_rewrite import mini_rewrite
 from ..context.vector_store import get_vector_store
 from ..ui.i18n import get_reply_language_hint
+
+try:
+    from ..backend.rag.stores import auto_retrieve as backend_auto_retrieve
+except Exception:
+    backend_auto_retrieve = None
 
 
 def _log(msg: str):
@@ -138,6 +144,7 @@ class StructuredAgent(RuntimeCoreMixin):
         # 工具
         self._tools = None
         self._load_tools()
+        self._grounding_tool_chain = []
 
     def _load_tools(self):
         self._tools = get_all_tools()
@@ -160,6 +167,7 @@ class StructuredAgent(RuntimeCoreMixin):
         if matched_skill_ids and len(selected) != len(tools):
             _log(f"Skill-retrieved subset: {len(selected)}/{len(tools)} via {matched_skill_ids[:4]}")
             tools = selected
+        tools = self._apply_capability_grounding(tools)
         _log(f"Tools for intent '{intent}': {len(tools)}")
         return tools
 
@@ -196,6 +204,8 @@ class StructuredAgent(RuntimeCoreMixin):
             r = route_message(user_message)
             _log(f"Route: intent={r.intent}, domain={r.domain}, complexity={r.complexity}")
             memory_hint = self._build_memory_hint(user_message, r.complexity)
+            grounding_chain = self._compute_capability_grounding(user_message, llm=self.llm, fallback_task_type=r.intent)
+            self._grounding_tool_chain = grounding_chain
 
             # 获取工具子集
             tools = self._get_tools(r.intent, query=user_message, domain=r.domain)
@@ -218,7 +228,17 @@ class StructuredAgent(RuntimeCoreMixin):
 
             # 用户消息
             language_hint = get_reply_language_hint(user_message)
-            augmented = _PREFLIGHT + user_message + domain_hint + memory_hint + ("\n" + skill_hint if skill_hint else "") + language_hint
+            grounding_hint = ""
+            if grounding_chain:
+                grounding_hint = "\n[Capability Grounding]\n优先工具链：\n- " + "\n- ".join(grounding_chain[:12])
+                try:
+                    self._fire_callback(
+                        self.on_plan,
+                        f"__GROUNDING__:{json.dumps({'capabilities': [], 'tool_chain': grounding_chain}, ensure_ascii=False)}",
+                    )
+                except Exception:
+                    pass
+            augmented = _PREFLIGHT + user_message + domain_hint + memory_hint + grounding_hint + ("\n" + skill_hint if skill_hint else "") + language_hint
             self.conversation_history.append({"role": "user", "content": augmented})
 
             # 裁剪历史
@@ -252,6 +272,8 @@ class StructuredAgent(RuntimeCoreMixin):
             _log(f"ERROR:\n{tb}")
             self._log_action("error", error_msg)
             self._fire_callback(self.on_error, error_msg)
+        finally:
+            self._grounding_tool_chain = []
 
     def _handle_structured_response(
         self,
@@ -586,6 +608,47 @@ class StructuredAgent(RuntimeCoreMixin):
             return "\n[记忆检索提示]\n" + "\n".join(lines)
         except Exception:
             return ""
+
+    def _compute_capability_grounding(self, user_message: str, llm=None, fallback_task_type: str = "general") -> list:
+        if backend_auto_retrieve is None:
+            return []
+        try:
+            rw = mini_rewrite(user_message, llm=llm)
+            normalized = rw.get("normalized_instruction", user_message)
+            extracted_terms = rw.get("extracted_terms", [])
+            task_type = rw.get("task_type", "") or fallback_task_type or "general"
+            rag = backend_auto_retrieve(
+                normalized_instruction=normalized,
+                extracted_terms=extracted_terms,
+                task_type=task_type,
+            )
+            chain = []
+            for cap in (rag.get("capability_hits", []) or []):
+                for t in (cap.get("tool_chain", []) or []):
+                    ts = str(t).strip()
+                    if ts and ts not in chain:
+                        chain.append(ts)
+            return chain
+        except Exception:
+            return []
+
+    def _apply_capability_grounding(self, tools: list) -> list:
+        if not self._grounding_tool_chain or not tools:
+            return tools
+        allow = set(self._grounding_tool_chain)
+        allow.update({"get_scene_info", "scene.get_summary", "get_object_info", "gn_get_summary"})
+        subset = [t for t in tools if isinstance(t, dict) and t.get("name") in allow]
+        if len(subset) < 3:
+            return tools
+        m = {t.get("name"): t for t in subset if isinstance(t, dict)}
+        ordered = []
+        for n in self._grounding_tool_chain:
+            if n in m:
+                ordered.append(m[n])
+        for n in ("get_scene_info", "scene.get_summary", "get_object_info", "gn_get_summary"):
+            if n in m and m[n] not in ordered:
+                ordered.append(m[n])
+        return ordered or tools
 
     def _remember_text(self, role: str, text: str):
         try:

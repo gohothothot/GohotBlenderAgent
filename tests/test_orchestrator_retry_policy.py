@@ -86,6 +86,48 @@ class TestOrchestratorRetryPolicy(unittest.TestCase):
         self.assertEqual(step.params["size_m"], 0.001)
         self.assertEqual(step.params["segments"], 1)
 
+    def test_enforce_capability_grounding_filters_invalid_steps(self):
+        Orch = _load_orchestrator_class()
+        orch = Orch.__new__(Orch)
+        orch.on_plan = None
+        orch._fire_callback = lambda cb, *args: cb(*args)
+        orch._planner = type(
+            "_DummyPlanner",
+            (),
+            {
+                "plan": lambda self, _msg, _intent: SimpleNamespace(
+                    steps=[
+                        SimpleNamespace(step=1, tool="gn_create_modifier", params={}, description="", status="pending", error=""),
+                        SimpleNamespace(step=2, tool="unknown_tool_x", params={}, description="", status="pending", error=""),
+                        SimpleNamespace(step=3, tool="", params={}, description="manual step", status="pending", error=""),
+                    ],
+                    total_steps=3,
+                    summary="dummy",
+                    failed_steps=[],
+                )
+            },
+        )()
+        route = SimpleNamespace(intent="modify")
+        plan = SimpleNamespace(
+            steps=[
+                SimpleNamespace(step=1, tool="gn_create_modifier", params={}, description="", status="pending", error=""),
+                SimpleNamespace(step=2, tool="bad_tool", params={}, description="", status="pending", error=""),
+            ],
+            total_steps=2,
+            summary="orig",
+            failed_steps=[],
+        )
+
+        out = orch._enforce_capability_tool_grounding(
+            plan=plan,
+            raw_user_message="创建几何节点链路",
+            route=route,
+            capability_tool_chain=["gn_create_modifier", "gn_add_node", "gn_link_nodes", "gn_get_summary"],
+        )
+        tools = [getattr(s, "tool", "") for s in out.steps]
+        self.assertIn("gn_create_modifier", tools)
+        self.assertNotIn("bad_tool", tools)
+
 
 if __name__ == "__main__":
     unittest.main()

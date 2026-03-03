@@ -9,6 +9,13 @@ import json
 from .state import get_preferences, get_pending_permission, get_pending_plan, get_pending_code
 
 
+def _short(text: str, limit: int = 120) -> str:
+    s = str(text or "")
+    if len(s) <= limit:
+        return s
+    return s[: max(0, limit - 1)] + "…"
+
+
 def _draw_health_badge(layout, state):
     status = state.last_exec_status or "idle"
     mode = state.last_exec_mode or "-"
@@ -31,9 +38,23 @@ def _draw_health_badge(layout, state):
         layout.label(text=f"对话通道: {'Meshy' if cmode == 'meshy_pipeline' else 'Agent'}", icon="INFO")
     except Exception:
         pass
-    layout.label(text=f"本轮路由判定: {state.last_route_hint or '-'}", icon="OUTLINER")
-    layout.label(text=f"最近卡住原因: {state.last_stall_reason or '-'}", icon="INFO")
-    layout.label(text=f"Skill命中: {getattr(state, 'last_skill_matches', '-') or '-'}", icon="RNA")
+    layout.label(text=f"本轮路由判定: {_short(state.last_route_hint or '-', 72)}", icon="OUTLINER")
+    layout.label(text=f"最近卡住原因: {_short(state.last_stall_reason or '-', 72)}", icon="INFO")
+    layout.label(text=f"Skill命中: {_short(getattr(state, 'last_skill_matches', '-') or '-', 96)}", icon="RNA")
+    grounding_caps = getattr(state, "last_grounding_caps", "-") or "-"
+    grounding_tools = getattr(state, "last_grounding_tools", "-") or "-"
+    grounding_exec = getattr(state, "last_grounding_exec", "-") or "-"
+    layout.label(text=f"Grounding能力: {_short(grounding_caps, 96)}", icon="LINKED")
+    layout.label(text=f"Grounding链路: {_short(grounding_tools, 120)}", icon="TRACKING")
+    layout.label(text=f"Grounding执行: {_short(grounding_exec, 120)}", icon="INFO")
+    if grounding_tools != "-" and grounding_exec == "-" and status in ("no_toolcall", "error", "error_after_toolcall"):
+        layout.label(text="诊断: 命中链路但未执行链路工具。", icon="ERROR")
+        if status == "no_toolcall":
+            layout.label(text="建议: 检查模型是否触发 tool_call / XML tool_call。", icon="INFO")
+        elif status == "error_after_toolcall":
+            layout.label(text="建议: 可能执行了非链路工具或参数校验失败。", icon="INFO")
+        else:
+            layout.label(text="建议: 检查工具白名单、参数名和模式回退日志。", icon="INFO")
     if int(getattr(state, "pseudo_fallback_hits", 0)) > 0:
         layout.label(text=f"伪调用兜底命中: {int(state.pseudo_fallback_hits)} 次", icon="INFO")
 

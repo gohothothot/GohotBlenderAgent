@@ -133,6 +133,8 @@ def build_performance_summary(session: dict) -> dict:
     attach = [m for m in metrics if m.get("metric_name") == "shader_context_attach"]
     plans = [m for m in metrics if m.get("metric_name") == "shader_read_plan"]
     search_results = [m for m in metrics if m.get("metric_name") == "shader_search_index_result"]
+    grounding_match = [m for m in metrics if m.get("metric_name") == "grounding_match"]
+    grounding_quality = [m for m in metrics if m.get("metric_name") == "grounding_quality"]
 
     prewarm_elapsed = []
     prewarm_success = 0
@@ -177,6 +179,23 @@ def build_performance_summary(session: dict) -> dict:
     search_total = len(search_results)
     search_success_rate = round(search_success / search_total, 4) if search_total else 0.0
 
+    grounding_turns = 0
+    grounding_chain_len = []
+    grounding_exec_unique = []
+    grounding_miss = 0
+    for m in grounding_quality:
+        p = m.get("payload", {}) or {}
+        if not p.get("has_grounding"):
+            continue
+        grounding_turns += 1
+        cl = int(p.get("chain_len", 0) or 0)
+        eu = int(p.get("executed_unique", 0) or 0)
+        grounding_chain_len.append(float(cl))
+        grounding_exec_unique.append(float(eu))
+        if bool(p.get("miss_all")):
+            grounding_miss += 1
+    grounding_miss_rate = round(grounding_miss / grounding_turns, 4) if grounding_turns else 0.0
+
     return {
         "metric_events": len(metrics),
         "shader_prewarm": {
@@ -200,6 +219,14 @@ def build_performance_summary(session: dict) -> dict:
             "success_rate": search_success_rate,
             "avg_candidate_count": _avg(search_candidates),
         },
+        "grounding": {
+            "match_events": len(grounding_match),
+            "turns_with_grounding": grounding_turns,
+            "miss_all_turns": grounding_miss,
+            "miss_all_rate": grounding_miss_rate,
+            "avg_chain_len": _avg(grounding_chain_len),
+            "avg_executed_unique": _avg(grounding_exec_unique),
+        },
     }
 
 
@@ -210,6 +237,7 @@ def format_performance_brief(summary: dict) -> str:
     attach = summary.get("shader_context_attach", {})
     search = summary.get("shader_search_index_result", {})
     plan = summary.get("shader_read_plan", {})
+    grounding = summary.get("grounding", {})
     return (
         f"metrics={summary.get('metric_events', 0)}; "
         f"prewarm={prewarm.get('success', 0)}/{prewarm.get('total', 0)} "
@@ -217,7 +245,8 @@ def format_performance_brief(summary: dict) -> str:
         f"hit_rate={round(attach.get('prewarm_hit_rate', 0) * 100, 1)}%; "
         f"search_ok={round(search.get('success_rate', 0) * 100, 1)}% "
         f"(avg candidates {search.get('avg_candidate_count', 0)}); "
-        f"plan_avg_tokens={plan.get('avg_estimated_output_tokens', 0)}"
+        f"plan_avg_tokens={plan.get('avg_estimated_output_tokens', 0)}; "
+        f"grounding_miss={round(grounding.get('miss_all_rate', 0) * 100, 1)}%"
     )
 
 

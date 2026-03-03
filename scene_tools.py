@@ -1,5 +1,6 @@
 import bpy
 import math
+import os
 from .shader_tools import _result
 
 
@@ -145,6 +146,28 @@ def scene_remove_modifier(object_name: str, modifier_name: str) -> dict:
             return _result(False, None, f"修改器不存在: {modifier_name}")
         obj.modifiers.remove(mod)
         return _result(True, f"已移除 {object_name} 的修改器: {modifier_name}")
+    except Exception as e:
+        return _result(False, None, str(e))
+
+
+def scene_apply_modifier(object_name: str, modifier_name: str) -> dict:
+    try:
+        if object_name not in bpy.data.objects:
+            return _result(False, None, f"物体不存在: {object_name}")
+        obj = bpy.data.objects[object_name]
+        mod = obj.modifiers.get(modifier_name)
+        if mod is None:
+            return _result(False, None, f"修改器不存在: {modifier_name}")
+        if obj.type not in {"MESH", "CURVE", "SURFACE", "FONT", "META", "GREASEPENCIL"}:
+            return _result(False, None, f"对象类型不支持应用修改器: {obj.type}")
+
+        view_layer = bpy.context.view_layer
+        for o in view_layer.objects:
+            o.select_set(False)
+        obj.select_set(True)
+        view_layer.objects.active = obj
+        bpy.ops.object.modifier_apply(modifier=modifier_name)
+        return _result(True, {"object": object_name, "applied_modifier": modifier_name})
     except Exception as e:
         return _result(False, None, str(e))
 
@@ -423,6 +446,36 @@ def scene_get_render_settings() -> dict:
         return _result(False, None, str(e))
 
 
+def scene_set_frame_range(frame_start: int, frame_end: int, fps: int = None) -> dict:
+    try:
+        scene = bpy.context.scene
+        fs = int(frame_start)
+        fe = int(frame_end)
+        if fe < fs:
+            return _result(False, None, "frame_end 不能小于 frame_start")
+        scene.frame_start = fs
+        scene.frame_end = fe
+        if scene.frame_current < fs or scene.frame_current > fe:
+            scene.frame_current = fs
+        changes = {"frame_start": scene.frame_start, "frame_end": scene.frame_end}
+        if fps is not None:
+            scene.render.fps = int(fps)
+            changes["fps"] = scene.render.fps
+        return _result(True, changes)
+    except Exception as e:
+        return _result(False, None, str(e))
+
+
+def scene_set_current_frame(frame: int) -> dict:
+    try:
+        scene = bpy.context.scene
+        target = int(frame)
+        scene.frame_set(target)
+        return _result(True, {"frame_current": int(scene.frame_current)})
+    except Exception as e:
+        return _result(False, None, str(e))
+
+
 def scene_set_render_settings(engine: str = None, resolution: list = None,
                                samples: int = None, use_ssr: bool = None,
                                use_ssr_refraction: bool = None,
@@ -481,6 +534,73 @@ def scene_set_render_settings(engine: str = None, resolution: list = None,
             changes.append(f"视图变换={view_transform}")
         
         return _result(True, f"已更新渲染设置: {', '.join(changes)}")
+    except Exception as e:
+        return _result(False, None, str(e))
+
+
+def _resolve_output_path(path: str) -> str:
+    p = str(path or "").strip()
+    if p.startswith("//"):
+        return bpy.path.abspath(p)
+    return p
+
+
+def scene_save_blend(filepath: str, compress: bool = True, make_dirs: bool = True) -> dict:
+    try:
+        path = _resolve_output_path(filepath)
+        if not path:
+            return _result(False, None, "filepath 不能为空")
+        if not path.lower().endswith(".blend"):
+            path = f"{path}.blend"
+        folder = os.path.dirname(path)
+        if folder and make_dirs:
+            os.makedirs(folder, exist_ok=True)
+        bpy.ops.wm.save_as_mainfile(filepath=path, compress=bool(compress))
+        return _result(True, {"saved": True, "filepath": path, "compress": bool(compress)})
+    except Exception as e:
+        return _result(False, None, str(e))
+
+
+def scene_export_fbx(filepath: str, use_selection: bool = False, apply_modifiers: bool = True, make_dirs: bool = True) -> dict:
+    try:
+        path = _resolve_output_path(filepath)
+        if not path:
+            return _result(False, None, "filepath 不能为空")
+        folder = os.path.dirname(path)
+        if folder and make_dirs:
+            os.makedirs(folder, exist_ok=True)
+        bpy.ops.export_scene.fbx(
+            filepath=path,
+            use_selection=bool(use_selection),
+            use_mesh_modifiers=bool(apply_modifiers),
+        )
+        return _result(True, {"exported": True, "format": "FBX", "filepath": path, "use_selection": bool(use_selection)})
+    except Exception as e:
+        return _result(False, None, str(e))
+
+
+def scene_export_gltf(
+    filepath: str,
+    export_format: str = "GLB",
+    use_selection: bool = False,
+    make_dirs: bool = True,
+) -> dict:
+    try:
+        path = _resolve_output_path(filepath)
+        if not path:
+            return _result(False, None, "filepath 不能为空")
+        fmt = str(export_format or "GLB").upper()
+        if fmt not in {"GLB", "GLTF_SEPARATE", "GLTF_EMBEDDED"}:
+            return _result(False, None, f"无效 export_format: {fmt}")
+        folder = os.path.dirname(path)
+        if folder and make_dirs:
+            os.makedirs(folder, exist_ok=True)
+        bpy.ops.export_scene.gltf(
+            filepath=path,
+            export_format=fmt,
+            use_selection=bool(use_selection),
+        )
+        return _result(True, {"exported": True, "format": fmt, "filepath": path, "use_selection": bool(use_selection)})
     except Exception as e:
         return _result(False, None, str(e))
 
@@ -625,6 +745,433 @@ def scene_list_all_materials() -> dict:
         return _result(False, None, str(e))
 
 
+def controller_create_empty(
+    name: str = "CTRL",
+    location: list = None,
+    display_type: str = "PLAIN_AXES",
+) -> dict:
+    """创建控制器 Empty（官方推荐用于约束/驱动控制）"""
+    try:
+        loc = tuple(location) if location else (0.0, 0.0, 0.0)
+        bpy.ops.object.empty_add(type=display_type, location=loc)
+        obj = bpy.context.active_object
+        obj.name = name or obj.name
+        return _result(True, {"name": obj.name, "location": list(obj.location), "type": obj.empty_display_type})
+    except Exception as e:
+        return _result(False, None, str(e))
+
+
+def _controller_add_constraint(
+    owner_name: str,
+    target_name: str,
+    constraint_type: str,
+    influence: float = 1.0,
+) -> dict:
+    if owner_name not in bpy.data.objects:
+        return _result(False, None, f"物体不存在: {owner_name}")
+    if target_name not in bpy.data.objects:
+        return _result(False, None, f"目标不存在: {target_name}")
+    owner = bpy.data.objects[owner_name]
+    target = bpy.data.objects[target_name]
+    c = owner.constraints.new(type=constraint_type)
+    c.target = target
+    c.influence = max(0.0, min(1.0, float(influence)))
+    return _result(True, {"owner": owner_name, "target": target_name, "constraint": c.name, "type": constraint_type, "influence": c.influence})
+
+
+def controller_add_copy_location(owner_name: str, target_name: str, influence: float = 1.0) -> dict:
+    try:
+        return _controller_add_constraint(owner_name, target_name, "COPY_LOCATION", influence=influence)
+    except Exception as e:
+        return _result(False, None, str(e))
+
+
+def controller_add_copy_rotation(owner_name: str, target_name: str, influence: float = 1.0) -> dict:
+    try:
+        return _controller_add_constraint(owner_name, target_name, "COPY_ROTATION", influence=influence)
+    except Exception as e:
+        return _result(False, None, str(e))
+
+
+def controller_add_copy_scale(owner_name: str, target_name: str, influence: float = 1.0) -> dict:
+    try:
+        return _controller_add_constraint(owner_name, target_name, "COPY_SCALE", influence=influence)
+    except Exception as e:
+        return _result(False, None, str(e))
+
+
+def controller_add_track_to(owner_name: str, target_name: str, track_axis: str = "TRACK_Z", up_axis: str = "UP_Y", influence: float = 1.0) -> dict:
+    try:
+        result = _controller_add_constraint(owner_name, target_name, "TRACK_TO", influence=influence)
+        if not result.get("success"):
+            return result
+        owner = bpy.data.objects[owner_name]
+        c = owner.constraints[-1]
+        c.track_axis = track_axis
+        c.up_axis = up_axis
+        return _result(True, {"owner": owner_name, "target": target_name, "constraint": c.name, "track_axis": c.track_axis, "up_axis": c.up_axis})
+    except Exception as e:
+        return _result(False, None, str(e))
+
+
+def controller_add_custom_property(object_name: str, prop_name: str, value: float = 0.0, min_value: float = 0.0, max_value: float = 1.0) -> dict:
+    """给对象添加自定义属性（用于驱动控制器）"""
+    try:
+        if object_name not in bpy.data.objects:
+            return _result(False, None, f"物体不存在: {object_name}")
+        obj = bpy.data.objects[object_name]
+        obj[prop_name] = float(value)
+        try:
+            ui = obj.id_properties_ui(prop_name)
+            ui.update(min=float(min_value), max=float(max_value), soft_min=float(min_value), soft_max=float(max_value))
+        except Exception:
+            pass
+        return _result(True, {"object": object_name, "property": prop_name, "value": float(obj[prop_name])})
+    except Exception as e:
+        return _result(False, None, str(e))
+
+
+def _find_constraint(obj, constraint_name: str = "", constraint_type: str = ""):
+    if constraint_name:
+        c = obj.constraints.get(constraint_name)
+        if c is not None:
+            return c
+    if constraint_type:
+        ctype = str(constraint_type).upper().strip()
+        for c in obj.constraints:
+            if c.type == ctype:
+                return c
+    return None
+
+
+def controller_add_child_of(owner_name: str, target_name: str, influence: float = 1.0, set_inverse: bool = True) -> dict:
+    """添加 Child Of 约束（常用于控制器级联）"""
+    try:
+        result = _controller_add_constraint(owner_name, target_name, "CHILD_OF", influence=influence)
+        if not result.get("success"):
+            return result
+        owner = bpy.data.objects[owner_name]
+        c = owner.constraints[-1]
+        if set_inverse:
+            try:
+                mat = owner.matrix_world.copy()
+                c.inverse_matrix = bpy.data.objects[target_name].matrix_world.inverted() @ mat
+            except Exception:
+                pass
+        return _result(True, {"owner": owner_name, "target": target_name, "constraint": c.name, "type": c.type, "influence": c.influence})
+    except Exception as e:
+        return _result(False, None, str(e))
+
+
+def controller_set_constraint_influence(
+    owner_name: str,
+    constraint_name: str = "",
+    constraint_type: str = "",
+    influence: float = 1.0,
+) -> dict:
+    """设置约束影响值（可按约束名或类型定位）"""
+    try:
+        if owner_name not in bpy.data.objects:
+            return _result(False, None, f"物体不存在: {owner_name}")
+        obj = bpy.data.objects[owner_name]
+        c = _find_constraint(obj, constraint_name=constraint_name, constraint_type=constraint_type)
+        if c is None:
+            return _result(False, None, f"未找到约束: name={constraint_name}, type={constraint_type}")
+        c.influence = max(0.0, min(1.0, float(influence)))
+        return _result(True, {"owner": owner_name, "constraint": c.name, "type": c.type, "influence": c.influence})
+    except Exception as e:
+        return _result(False, None, str(e))
+
+
+def controller_remove_constraint(owner_name: str, constraint_name: str = "", constraint_type: str = "") -> dict:
+    """移除约束（可按约束名或类型定位）"""
+    try:
+        if owner_name not in bpy.data.objects:
+            return _result(False, None, f"物体不存在: {owner_name}")
+        obj = bpy.data.objects[owner_name]
+        c = _find_constraint(obj, constraint_name=constraint_name, constraint_type=constraint_type)
+        if c is None:
+            return _result(False, None, f"未找到约束: name={constraint_name}, type={constraint_type}")
+        cname = c.name
+        obj.constraints.remove(c)
+        return _result(True, {"owner": owner_name, "removed_constraint": cname})
+    except Exception as e:
+        return _result(False, None, str(e))
+
+
+def object_rename(old_name: str, new_name: str) -> dict:
+    try:
+        if old_name not in bpy.data.objects:
+            return _result(False, None, f"物体不存在: {old_name}")
+        if not new_name or not str(new_name).strip():
+            return _result(False, None, "new_name 不能为空")
+        obj = bpy.data.objects[old_name]
+        obj.name = str(new_name).strip()
+        return _result(True, {"old_name": old_name, "new_name": obj.name})
+    except Exception as e:
+        return _result(False, None, str(e))
+
+
+def object_select_set_active(object_name: str, select: bool = True) -> dict:
+    try:
+        if object_name not in bpy.data.objects:
+            return _result(False, None, f"物体不存在: {object_name}")
+        bpy.ops.object.select_all(action="DESELECT")
+        obj = bpy.data.objects[object_name]
+        obj.select_set(bool(select))
+        bpy.context.view_layer.objects.active = obj if select else None
+        return _result(True, {"object": object_name, "selected": bool(select), "active": bool(select)})
+    except Exception as e:
+        return _result(False, None, str(e))
+
+
+def object_duplicate_linked(name: str, new_name: str = "", location: list = None) -> dict:
+    try:
+        if name not in bpy.data.objects:
+            return _result(False, None, f"物体不存在: {name}")
+        src = bpy.data.objects[name]
+        dup = src.copy()
+        # linked duplicate: share mesh data block
+        dup.data = src.data
+        if new_name:
+            dup.name = str(new_name).strip()
+        if location and len(location) >= 3:
+            dup.location = (float(location[0]), float(location[1]), float(location[2]))
+        bpy.context.collection.objects.link(dup)
+        return _result(True, {"source": name, "duplicate": dup.name, "linked_data": True, "location": list(dup.location)})
+    except Exception as e:
+        return _result(False, None, str(e))
+
+
+def _resolve_gn_tree(object_name: str, modifier_name: str = ""):
+    if object_name not in bpy.data.objects:
+        return None, f"物体不存在: {object_name}"
+    obj = bpy.data.objects[object_name]
+    mod = None
+    if modifier_name:
+        mod = obj.modifiers.get(modifier_name)
+    if mod is None:
+        for m in obj.modifiers:
+            if m.type == "NODES":
+                mod = m
+                break
+    if mod is None:
+        return None, "未找到 Geometry Nodes 修改器"
+    if mod.type != "NODES":
+        return None, f"修改器不是 Geometry Nodes: {mod.name}"
+    if mod.node_group is None:
+        mod.node_group = bpy.data.node_groups.new(name=f"GN_{obj.name}", type="GeometryNodeTree")
+        # 初始化 IO
+        group = mod.node_group
+        nodes = group.nodes
+        inp = nodes.new("NodeGroupInput")
+        out = nodes.new("NodeGroupOutput")
+        inp.location = (-400, 0)
+        out.location = (300, 0)
+        try:
+            if hasattr(group, "interface"):
+                group.interface.new_socket(name="Geometry", in_out="INPUT", socket_type="NodeSocketGeometry")
+                group.interface.new_socket(name="Geometry", in_out="OUTPUT", socket_type="NodeSocketGeometry")
+            else:
+                group.inputs.new("NodeSocketGeometry", "Geometry")
+                group.outputs.new("NodeSocketGeometry", "Geometry")
+        except Exception:
+            pass
+    return mod.node_group, ""
+
+
+def gn_create_modifier(object_name: str, modifier_name: str = "GeometryNodes") -> dict:
+    """给对象创建 Geometry Nodes 修改器并初始化节点组"""
+    try:
+        if object_name not in bpy.data.objects:
+            return _result(False, None, f"物体不存在: {object_name}")
+        obj = bpy.data.objects[object_name]
+        mod = obj.modifiers.get(modifier_name)
+        if mod is None:
+            mod = obj.modifiers.new(name=modifier_name, type="NODES")
+        group, err = _resolve_gn_tree(object_name, modifier_name=mod.name)
+        if group is None:
+            return _result(False, None, err)
+        return _result(True, {"object": object_name, "modifier": mod.name, "node_group": group.name})
+    except Exception as e:
+        return _result(False, None, str(e))
+
+
+def gn_add_node(object_name: str, node_type: str, node_name: str = "", modifier_name: str = "", location: list = None) -> dict:
+    try:
+        group, err = _resolve_gn_tree(object_name, modifier_name=modifier_name)
+        if group is None:
+            return _result(False, None, err)
+        node = group.nodes.new(node_type)
+        if node_name:
+            node.name = node_name
+            node.label = node_name
+        if location and len(location) >= 2:
+            node.location = (float(location[0]), float(location[1]))
+        return _result(True, {"node": node.name, "type": node.bl_idname, "group": group.name})
+    except Exception as e:
+        return _result(False, None, str(e))
+
+
+def gn_link_nodes(
+    object_name: str,
+    from_node: str,
+    from_socket: str,
+    to_node: str,
+    to_socket: str,
+    modifier_name: str = "",
+) -> dict:
+    try:
+        group, err = _resolve_gn_tree(object_name, modifier_name=modifier_name)
+        if group is None:
+            return _result(False, None, err)
+        fn = group.nodes.get(from_node)
+        tn = group.nodes.get(to_node)
+        if fn is None or tn is None:
+            return _result(False, None, f"节点不存在: from={from_node}, to={to_node}")
+        fs = fn.outputs.get(from_socket)
+        ts = tn.inputs.get(to_socket)
+        if fs is None or ts is None:
+            return _result(False, None, f"插槽不存在: {from_socket}->{to_socket}")
+        group.links.new(fs, ts)
+        return _result(True, {"group": group.name, "from": f"{from_node}.{from_socket}", "to": f"{to_node}.{to_socket}"})
+    except Exception as e:
+        return _result(False, None, str(e))
+
+
+def gn_set_input_default(
+    object_name: str,
+    node_name: str,
+    input_name: str,
+    value,
+    modifier_name: str = "",
+) -> dict:
+    try:
+        group, err = _resolve_gn_tree(object_name, modifier_name=modifier_name)
+        if group is None:
+            return _result(False, None, err)
+        node = group.nodes.get(node_name)
+        if node is None:
+            return _result(False, None, f"节点不存在: {node_name}")
+        inp = node.inputs.get(input_name)
+        if inp is None:
+            return _result(False, None, f"输入不存在: {input_name}")
+        if isinstance(value, (list, tuple)):
+            for i, v in enumerate(value):
+                inp.default_value[i] = v
+        else:
+            inp.default_value = value
+        return _result(True, {"node": node_name, "input": input_name, "value": value})
+    except Exception as e:
+        return _result(False, None, str(e))
+
+
+def gn_expose_group_input(
+    object_name: str,
+    socket_name: str,
+    socket_type: str = "NodeSocketFloat",
+    default_value=None,
+    modifier_name: str = "",
+) -> dict:
+    try:
+        group, err = _resolve_gn_tree(object_name, modifier_name=modifier_name)
+        if group is None:
+            return _result(False, None, err)
+        created = False
+        # Blender 4.x interface API
+        if hasattr(group, "interface"):
+            exists = False
+            for item in group.interface.items_tree:
+                if getattr(item, "item_type", "") == "SOCKET" and getattr(item, "name", "") == socket_name and getattr(item, "in_out", "") == "INPUT":
+                    exists = True
+                    break
+            if not exists:
+                group.interface.new_socket(name=socket_name, in_out="INPUT", socket_type=socket_type)
+                created = True
+        else:
+            if socket_name not in group.inputs:
+                group.inputs.new(socket_type, socket_name)
+                created = True
+        # 设置 Group Input 默认值（若可用）
+        for node in group.nodes:
+            if node.bl_idname == "NodeGroupInput":
+                sock = node.outputs.get(socket_name)
+                if sock and default_value is not None:
+                    try:
+                        sock.default_value = default_value
+                    except Exception:
+                        pass
+                break
+        return _result(True, {"group": group.name, "socket": socket_name, "created": created})
+    except Exception as e:
+        return _result(False, None, str(e))
+
+
+def gn_get_summary(object_name: str, modifier_name: str = "") -> dict:
+    try:
+        group, err = _resolve_gn_tree(object_name, modifier_name=modifier_name)
+        if group is None:
+            return _result(False, None, err)
+        nodes = []
+        for n in group.nodes:
+            nodes.append({"name": n.name, "type": n.bl_idname, "inputs": len(n.inputs), "outputs": len(n.outputs)})
+        links = []
+        for l in group.links:
+            links.append(f"{l.from_node.name}.{l.from_socket.name} -> {l.to_node.name}.{l.to_socket.name}")
+        return _result(True, {"group": group.name, "node_count": len(nodes), "link_count": len(links), "nodes": nodes[:120], "links": links[:200]})
+    except Exception as e:
+        return _result(False, None, str(e))
+
+
+def gn_remove_node(object_name: str, node_name: str, modifier_name: str = "") -> dict:
+    try:
+        group, err = _resolve_gn_tree(object_name, modifier_name=modifier_name)
+        if group is None:
+            return _result(False, None, err)
+        node = group.nodes.get(node_name)
+        if node is None:
+            return _result(False, None, f"节点不存在: {node_name}")
+        group.nodes.remove(node)
+        return _result(True, {"group": group.name, "removed": node_name})
+    except Exception as e:
+        return _result(False, None, str(e))
+
+
+def gn_auto_layout_nodes(object_name: str, modifier_name: str = "", x_gap: float = 220.0, y_gap: float = 140.0) -> dict:
+    try:
+        group, err = _resolve_gn_tree(object_name, modifier_name=modifier_name)
+        if group is None:
+            return _result(False, None, err)
+        nodes = list(group.nodes)
+        if not nodes:
+            return _result(True, {"group": group.name, "node_count": 0})
+        # 简单按类型分层排布：输入 -> 处理中间 -> 输出
+        inputs = [n for n in nodes if "Input" in n.bl_idname]
+        outputs = [n for n in nodes if "Output" in n.bl_idname]
+        middles = [n for n in nodes if n not in inputs and n not in outputs]
+        ordered = inputs + middles + outputs
+        for i, n in enumerate(ordered):
+            n.location = (float(i) * float(x_gap), -float(i % 3) * float(y_gap))
+        return _result(True, {"group": group.name, "node_count": len(nodes), "arranged": [n.name for n in ordered[:80]]})
+    except Exception as e:
+        return _result(False, None, str(e))
+
+
+def gn_find_node_by_type(object_name: str, node_type: str, modifier_name: str = "") -> dict:
+    try:
+        group, err = _resolve_gn_tree(object_name, modifier_name=modifier_name)
+        if group is None:
+            return _result(False, None, err)
+        key = str(node_type or "").strip().lower()
+        hits = []
+        for n in group.nodes:
+            if key in n.bl_idname.lower() or key == n.bl_idname.lower():
+                hits.append({"name": n.name, "type": n.bl_idname})
+        return _result(True, {"group": group.name, "query": node_type, "count": len(hits), "nodes": hits[:120]})
+    except Exception as e:
+        return _result(False, None, str(e))
+
+
 def execute_scene_tool(tool_name: str, arguments: dict) -> dict:
     tools_map = {
         "scene_add_light": scene_add_light,
@@ -634,6 +1181,7 @@ def execute_scene_tool(tool_name: str, arguments: dict) -> dict:
         "scene_add_modifier": scene_add_modifier,
         "scene_set_modifier_param": scene_set_modifier_param,
         "scene_remove_modifier": scene_remove_modifier,
+        "scene_apply_modifier": scene_apply_modifier,
         "scene_manage_collection": scene_manage_collection,
         "scene_set_world": scene_set_world,
         "scene_setup_daylight_water": scene_setup_daylight_water,
@@ -641,10 +1189,36 @@ def execute_scene_tool(tool_name: str, arguments: dict) -> dict:
         "scene_parent_object": scene_parent_object,
         "scene_set_visibility": scene_set_visibility,
         "scene_get_render_settings": scene_get_render_settings,
+        "scene_set_frame_range": scene_set_frame_range,
+        "scene_set_current_frame": scene_set_current_frame,
         "scene_set_render_settings": scene_set_render_settings,
+        "scene_save_blend": scene_save_blend,
+        "scene_export_fbx": scene_export_fbx,
+        "scene_export_gltf": scene_export_gltf,
         "scene_get_object_materials": scene_get_object_materials,
         "scene_get_world_info": scene_get_world_info,
         "scene_list_all_materials": scene_list_all_materials,
+        "controller_create_empty": controller_create_empty,
+        "controller_add_copy_location": controller_add_copy_location,
+        "controller_add_copy_rotation": controller_add_copy_rotation,
+        "controller_add_copy_scale": controller_add_copy_scale,
+        "controller_add_track_to": controller_add_track_to,
+        "controller_add_custom_property": controller_add_custom_property,
+        "controller_add_child_of": controller_add_child_of,
+        "controller_set_constraint_influence": controller_set_constraint_influence,
+        "controller_remove_constraint": controller_remove_constraint,
+        "object_rename": object_rename,
+        "object_select_set_active": object_select_set_active,
+        "object_duplicate_linked": object_duplicate_linked,
+        "gn_create_modifier": gn_create_modifier,
+        "gn_add_node": gn_add_node,
+        "gn_link_nodes": gn_link_nodes,
+        "gn_set_input_default": gn_set_input_default,
+        "gn_expose_group_input": gn_expose_group_input,
+        "gn_get_summary": gn_get_summary,
+        "gn_remove_node": gn_remove_node,
+        "gn_auto_layout_nodes": gn_auto_layout_nodes,
+        "gn_find_node_by_type": gn_find_node_by_type,
     }
     try:
         func = tools_map.get(tool_name)

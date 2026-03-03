@@ -988,6 +988,18 @@ TOOLS = [
         }
     },
     {
+        "name": "scene_apply_modifier",
+        "description": "应用修改器并烘焙到对象数据",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "object_name": {"type": "string", "description": "物体名称"},
+                "modifier_name": {"type": "string", "description": "修改器名称"}
+            },
+            "required": ["object_name", "modifier_name"]
+        }
+    },
+    {
         "name": "scene_manage_collection",
         "description": "管理集合。action: create(创建), delete(删除), move_object(移动物体到集合), list(列出所有集合)",
         "input_schema": {
@@ -1074,6 +1086,30 @@ TOOLS = [
         "input_schema": {"type": "object", "properties": {}, "required": []}
     },
     {
+        "name": "scene_set_frame_range",
+        "description": "设置时间轴起止帧，并可选设置 FPS。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "frame_start": {"type": "integer", "description": "起始帧"},
+                "frame_end": {"type": "integer", "description": "结束帧"},
+                "fps": {"type": "integer", "description": "帧率（可选）"}
+            },
+            "required": ["frame_start", "frame_end"]
+        }
+    },
+    {
+        "name": "scene_set_current_frame",
+        "description": "设置当前帧。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "frame": {"type": "integer", "description": "目标帧"}
+            },
+            "required": ["frame"]
+        }
+    },
+    {
         "name": "scene_set_render_settings",
         "description": "设置渲染参数：引擎(EEVEE/CYCLES/WORKBENCH)、分辨率、采样数、SSR、透明胶片、视图变换等。",
         "input_schema": {
@@ -1088,6 +1124,47 @@ TOOLS = [
                 "view_transform": {"type": "string", "description": "视图变换(如 Filmic, Standard)"}
             },
             "required": []
+        }
+    },
+    {
+        "name": "scene_save_blend",
+        "description": "保存当前场景为 .blend 文件。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "filepath": {"type": "string", "description": "输出路径（支持 // 相对路径）"},
+                "compress": {"type": "boolean", "description": "是否压缩"},
+                "make_dirs": {"type": "boolean", "description": "是否自动创建目录"}
+            },
+            "required": ["filepath"]
+        }
+    },
+    {
+        "name": "scene_export_fbx",
+        "description": "导出 FBX 文件。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "filepath": {"type": "string", "description": "输出路径"},
+                "use_selection": {"type": "boolean", "description": "仅导出选中对象"},
+                "apply_modifiers": {"type": "boolean", "description": "导出时应用修改器"},
+                "make_dirs": {"type": "boolean", "description": "是否自动创建目录"}
+            },
+            "required": ["filepath"]
+        }
+    },
+    {
+        "name": "scene_export_gltf",
+        "description": "导出 glTF/GLB 文件。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "filepath": {"type": "string", "description": "输出路径"},
+                "export_format": {"type": "string", "description": "GLB / GLTF_SEPARATE / GLTF_EMBEDDED"},
+                "use_selection": {"type": "boolean", "description": "仅导出选中对象"},
+                "make_dirs": {"type": "boolean", "description": "是否自动创建目录"}
+            },
+            "required": ["filepath"]
         }
     },
     {
@@ -1110,6 +1187,291 @@ TOOLS = [
         "name": "scene_list_all_materials",
         "description": "列出场景中所有材质及其使用情况：哪些物体在用、节点数量等。",
         "input_schema": {"type": "object", "properties": {}, "required": []}
+    },
+    {
+        "name": "controller_create_empty",
+        "description": "创建控制器 Empty（用于约束与驱动）。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "控制器名称"},
+                "location": {"type": "array", "items": {"type": "number"}, "description": "位置 [x,y,z]"},
+                "display_type": {"type": "string", "description": "Empty 显示类型，如 PLAIN_AXES/CUBE/SPHERE"}
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "controller_add_copy_location",
+        "description": "给物体添加 Copy Location 约束。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "owner_name": {"type": "string", "description": "被约束物体"},
+                "target_name": {"type": "string", "description": "目标控制器/物体"},
+                "influence": {"type": "number", "description": "影响值 0-1"}
+            },
+            "required": ["owner_name", "target_name"]
+        }
+    },
+    {
+        "name": "controller_add_copy_rotation",
+        "description": "给物体添加 Copy Rotation 约束。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "owner_name": {"type": "string"},
+                "target_name": {"type": "string"},
+                "influence": {"type": "number"}
+            },
+            "required": ["owner_name", "target_name"]
+        }
+    },
+    {
+        "name": "controller_add_copy_scale",
+        "description": "给物体添加 Copy Scale 约束。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "owner_name": {"type": "string"},
+                "target_name": {"type": "string"},
+                "influence": {"type": "number"}
+            },
+            "required": ["owner_name", "target_name"]
+        }
+    },
+    {
+        "name": "controller_add_track_to",
+        "description": "给物体添加 Track To 约束（常用于朝向控制）。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "owner_name": {"type": "string"},
+                "target_name": {"type": "string"},
+                "track_axis": {"type": "string", "description": "TRACK_Z / TRACK_NEGATIVE_Z 等"},
+                "up_axis": {"type": "string", "description": "UP_Y / UP_X / UP_Z"},
+                "influence": {"type": "number"}
+            },
+            "required": ["owner_name", "target_name"]
+        }
+    },
+    {
+        "name": "controller_add_custom_property",
+        "description": "给控制器/物体添加自定义属性（可用于 driver）。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "object_name": {"type": "string"},
+                "prop_name": {"type": "string"},
+                "value": {"type": "number"},
+                "min_value": {"type": "number"},
+                "max_value": {"type": "number"}
+            },
+            "required": ["object_name", "prop_name"]
+        }
+    },
+    {
+        "name": "controller_add_child_of",
+        "description": "添加 Child Of 约束（用于控制器层级跟随）。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "owner_name": {"type": "string"},
+                "target_name": {"type": "string"},
+                "influence": {"type": "number"},
+                "set_inverse": {"type": "boolean"}
+            },
+            "required": ["owner_name", "target_name"]
+        }
+    },
+    {
+        "name": "controller_set_constraint_influence",
+        "description": "设置约束影响值（按约束名或类型）。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "owner_name": {"type": "string"},
+                "constraint_name": {"type": "string"},
+                "constraint_type": {"type": "string"},
+                "influence": {"type": "number"}
+            },
+            "required": ["owner_name"]
+        }
+    },
+    {
+        "name": "controller_remove_constraint",
+        "description": "移除约束（按约束名或类型）。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "owner_name": {"type": "string"},
+                "constraint_name": {"type": "string"},
+                "constraint_type": {"type": "string"}
+            },
+            "required": ["owner_name"]
+        }
+    },
+    {
+        "name": "object_rename",
+        "description": "重命名物体。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "old_name": {"type": "string"},
+                "new_name": {"type": "string"}
+            },
+            "required": ["old_name", "new_name"]
+        }
+    },
+    {
+        "name": "object_select_set_active",
+        "description": "设置物体选择并设为活动对象。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "object_name": {"type": "string"},
+                "select": {"type": "boolean"}
+            },
+            "required": ["object_name"]
+        }
+    },
+    {
+        "name": "object_duplicate_linked",
+        "description": "关联复制物体（共享数据块）。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "new_name": {"type": "string"},
+                "location": {"type": "array", "items": {"type": "number"}}
+            },
+            "required": ["name"]
+        }
+    },
+    {
+        "name": "gn_create_modifier",
+        "description": "为物体创建 Geometry Nodes 修改器并初始化节点组。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "object_name": {"type": "string"},
+                "modifier_name": {"type": "string"}
+            },
+            "required": ["object_name"]
+        }
+    },
+    {
+        "name": "gn_add_node",
+        "description": "在 Geometry Nodes 节点组中添加节点。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "object_name": {"type": "string"},
+                "modifier_name": {"type": "string"},
+                "node_type": {"type": "string", "description": "如 GeometryNodeTransform / FunctionNodeRandomValue"},
+                "node_name": {"type": "string"},
+                "location": {"type": "array", "items": {"type": "number"}}
+            },
+            "required": ["object_name", "node_type"]
+        }
+    },
+    {
+        "name": "gn_link_nodes",
+        "description": "连接 Geometry Nodes 节点插槽。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "object_name": {"type": "string"},
+                "modifier_name": {"type": "string"},
+                "from_node": {"type": "string"},
+                "from_socket": {"type": "string"},
+                "to_node": {"type": "string"},
+                "to_socket": {"type": "string"}
+            },
+            "required": ["object_name", "from_node", "from_socket", "to_node", "to_socket"]
+        }
+    },
+    {
+        "name": "gn_set_input_default",
+        "description": "设置 Geometry Nodes 节点输入默认值。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "object_name": {"type": "string"},
+                "modifier_name": {"type": "string"},
+                "node_name": {"type": "string"},
+                "input_name": {"type": "string"},
+                "value": {"description": "标量或数组"}
+            },
+            "required": ["object_name", "node_name", "input_name", "value"]
+        }
+    },
+    {
+        "name": "gn_expose_group_input",
+        "description": "给 Geometry Nodes 节点组暴露 Group Input 输入插槽。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "object_name": {"type": "string"},
+                "modifier_name": {"type": "string"},
+                "socket_name": {"type": "string"},
+                "socket_type": {"type": "string", "description": "NodeSocketFloat/NodeSocketVector/NodeSocketInt 等"},
+                "default_value": {"description": "默认值"}
+            },
+            "required": ["object_name", "socket_name"]
+        }
+    },
+    {
+        "name": "gn_get_summary",
+        "description": "获取 Geometry Nodes 节点组摘要（节点与连接）。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "object_name": {"type": "string"},
+                "modifier_name": {"type": "string"}
+            },
+            "required": ["object_name"]
+        }
+    },
+    {
+        "name": "gn_remove_node",
+        "description": "删除 Geometry Nodes 节点。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "object_name": {"type": "string"},
+                "modifier_name": {"type": "string"},
+                "node_name": {"type": "string"}
+            },
+            "required": ["object_name", "node_name"]
+        }
+    },
+    {
+        "name": "gn_auto_layout_nodes",
+        "description": "自动整理 Geometry Nodes 节点布局。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "object_name": {"type": "string"},
+                "modifier_name": {"type": "string"},
+                "x_gap": {"type": "number"},
+                "y_gap": {"type": "number"}
+            },
+            "required": ["object_name"]
+        }
+    },
+    {
+        "name": "gn_find_node_by_type",
+        "description": "按节点类型查找 Geometry Nodes 节点。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "object_name": {"type": "string"},
+                "modifier_name": {"type": "string"},
+                "node_type": {"type": "string"}
+            },
+            "required": ["object_name", "node_type"]
+        }
     },
     {
         "name": "kb_search",
@@ -1818,7 +2180,12 @@ def execute_tool(tool_name: str, arguments: dict) -> dict:
                     s += f"\n  性能: {perf}"
                 summaries.append(s)
             return {"success": True, "result": "\n".join(summaries), "error": None}
-        elif tool_name.startswith("scene_"):
+        elif (
+            tool_name.startswith("scene_")
+            or tool_name.startswith("controller_")
+            or tool_name.startswith("gn_")
+            or tool_name in ("object_rename", "object_select_set_active", "object_duplicate_linked")
+        ):
             from . import scene_tools
             return scene_tools.execute_scene_tool(tool_name, arguments)
         elif tool_name in ("shader_create_toon_material", "shader_convert_to_toon"):

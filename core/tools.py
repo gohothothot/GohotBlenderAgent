@@ -53,11 +53,27 @@ TOOL_GROUPS = {
         "scene_add_light", "scene_modify_light",
         "scene_add_camera", "scene_set_active_camera",
         "scene_add_modifier", "scene_set_modifier_param", "scene_remove_modifier",
+        "scene_apply_modifier",
         "scene_manage_collection", "scene_set_world", "scene_setup_daylight_water",
         "scene_duplicate_object", "scene_parent_object", "scene_set_visibility",
+        "scene_set_frame_range", "scene_set_current_frame",
         "scene_get_render_settings", "scene_set_render_settings",
+        "scene_save_blend", "scene_export_fbx", "scene_export_gltf",
         "scene_get_object_materials", "scene_get_world_info",
         "scene_list_all_materials",
+    ],
+    "controller": [
+        "controller_create_empty", "controller_add_copy_location",
+        "controller_add_copy_rotation", "controller_add_copy_scale",
+        "controller_add_track_to", "controller_add_custom_property",
+        "controller_add_child_of", "controller_set_constraint_influence",
+        "controller_remove_constraint",
+        "object_rename", "object_select_set_active", "object_duplicate_linked",
+    ],
+    "geometry_nodes": [
+        "gn_create_modifier", "gn_add_node", "gn_link_nodes",
+        "gn_set_input_default", "gn_expose_group_input", "gn_get_summary",
+        "gn_remove_node", "gn_auto_layout_nodes", "gn_find_node_by_type",
     ],
     "animation": [
         "anim_add_uv_scroll", "anim_add_uv_rotate", "anim_add_uv_scale",
@@ -77,20 +93,20 @@ TOOL_GROUPS = {
 
 # 意图 → 工具组
 INTENT_GROUPS = {
-    "create":      ["basic", "material", "scene", "shader", "meshy", "search"],
-    "modify":      ["basic", "material", "shader", "scene", "search"],
+    "create":      ["basic", "material", "scene", "controller", "geometry_nodes", "shader", "meshy", "search"],
+    "modify":      ["basic", "material", "shader", "scene", "controller", "geometry_nodes", "search"],
     "delete":      ["basic", "scene"],
     "shader":      ["material", "shader", "search"],
     "shader_complex": ["material", "shader", "search", "meta"],
     "toon":        ["material", "toon", "shader"],
-    "animation":   ["animation", "shader", "basic"],
+    "animation":   ["animation", "shader", "basic", "controller", "scene"],
     "render":      ["render", "scene"],
     "generate_3d": ["meshy", "basic", "material"],
     "search":      ["search", "meta"],
-    "query":       ["basic", "material", "scene", "meta"],
-    "plan":        ["search", "meta", "file"],
+    "query":       ["basic", "material", "scene", "geometry_nodes", "meta"],
+    "plan":        ["search", "meta", "file", "scene", "controller", "geometry_nodes"],
     # general = 常用工具子集（约30个，避免 payload 过大导致 API 500）
-    "general":     ["basic", "material", "scene", "shader", "meshy", "search", "meta", "file"],
+    "general":     ["basic", "material", "scene", "controller", "geometry_nodes", "shader", "meshy", "search", "meta", "file"],
 }
 
 

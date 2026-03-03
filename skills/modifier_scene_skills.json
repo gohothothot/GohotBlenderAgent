@@ -115,5 +115,159 @@
       "开启 SSR/Refraction 后，再验证材质透射是否生效。"
     ],
     "verify_tools": ["scene_get_render_settings", "shader_get_material_summary"]
+  },
+  {
+    "id": "controller.copy_location",
+    "name": "Controller copy location",
+    "domain": "scene",
+    "intents": ["create", "modify", "animation"],
+    "tags": ["controller", "empty", "constraint", "copy location", "跟随"],
+    "description": "Create controller empty and bind copy-location constraint to target object.",
+    "tools": ["controller_create_empty", "controller_add_copy_location", "get_object_info"],
+    "quality_hints": [
+      "约束前确认 owner/target 都存在，优先使用 Empty 作为控制器。",
+      "influence 建议从 0.5 逐步调到 1.0，避免突变。"
+    ],
+    "verify_tools": ["get_object_info"]
+  },
+  {
+    "id": "controller.track_to",
+    "name": "Controller track-to aiming",
+    "domain": "scene",
+    "intents": ["modify", "animation"],
+    "tags": ["track to", "aim", "controller", "朝向", "相机"],
+    "description": "Use Track To constraint for look-at and aim workflows.",
+    "tools": ["controller_add_track_to", "get_object_info"],
+    "quality_hints": [
+      "track_axis/up_axis 要与对象朝向约定一致，避免翻转。",
+      "目标与被约束对象不要重合。"
+    ],
+    "verify_tools": ["get_object_info"]
+  },
+  {
+    "id": "gn.bootstrap",
+    "name": "Geometry Nodes bootstrap",
+    "domain": "scene",
+    "intents": ["create", "modify"],
+    "tags": ["geometry nodes", "gn", "程序化建模", "node group"],
+    "description": "Create GN modifier and inspect initial node graph.",
+    "tools": ["gn_create_modifier", "gn_get_summary"],
+    "quality_hints": [
+      "先创建并确认 Geometry 输入输出，再追加功能节点。",
+      "每次改图后都读取摘要，防止链路断开。"
+    ],
+    "verify_tools": ["gn_get_summary"]
+  },
+  {
+    "id": "gn.add_link_nodes",
+    "name": "Geometry Nodes add and link",
+    "domain": "scene",
+    "intents": ["create", "modify"],
+    "tags": ["gn", "add node", "link nodes", "socket", "节点连接"],
+    "description": "Incrementally add Geometry Nodes and wire sockets.",
+    "tools": ["gn_add_node", "gn_link_nodes", "gn_get_summary"],
+    "quality_hints": [
+      "先查 socket 名称再连线，避免无效连接。",
+      "复杂图采用分段构建，每段后验证。"
+    ],
+    "verify_tools": ["gn_get_summary"]
+  },
+  {
+    "id": "gn.parameterization",
+    "name": "Geometry Nodes parameterization",
+    "domain": "scene",
+    "intents": ["modify", "create"],
+    "tags": ["group input", "expose", "param", "默认值"],
+    "description": "Expose group inputs and set node defaults for controllable GN assets.",
+    "tools": ["gn_expose_group_input", "gn_set_input_default", "gn_get_summary"],
+    "quality_hints": [
+      "参数命名应表达语义（如 Density/Scale/Seed）。",
+      "默认值设置在稳定范围，减少异常几何。"
+    ],
+    "verify_tools": ["gn_get_summary"]
+  },
+  {
+    "id": "controller.child_of_stack",
+    "name": "Controller Child-Of stack",
+    "domain": "scene",
+    "intents": ["create", "modify", "animation"],
+    "tags": ["child of", "constraint", "controller", "层级跟随"],
+    "description": "Create Child Of constraint and fine tune/remove it safely.",
+    "tools": ["controller_add_child_of", "controller_set_constraint_influence", "controller_remove_constraint", "get_object_info"],
+    "quality_hints": [
+      "Child Of 建立后先低影响值验证，再逐步提升到目标值。",
+      "复杂绑定优先保留可回滚路径，必要时移除后重建。"
+    ],
+    "verify_tools": ["get_object_info"]
+  },
+  {
+    "id": "object.selection_and_linked_duplicate",
+    "name": "Object select and linked duplicate",
+    "domain": "scene",
+    "intents": ["create", "modify"],
+    "tags": ["rename", "select active", "linked duplicate", "基础操作"],
+    "description": "Rename object, set active selection, and create linked duplicates.",
+    "tools": ["object_rename", "object_select_set_active", "object_duplicate_linked", "get_scene_info"],
+    "quality_hints": [
+      "重命名后立即用查询工具确认名称一致，避免后续引用失败。",
+      "关联复制共享数据块，适合批量布局与实例化。"
+    ],
+    "verify_tools": ["get_scene_info", "get_object_info"]
+  },
+  {
+    "id": "gn.maintenance_tools",
+    "name": "Geometry Nodes maintenance tools",
+    "domain": "scene",
+    "intents": ["modify", "query"],
+    "tags": ["gn", "remove node", "layout", "find node"],
+    "description": "Maintain GN graph by removing nodes, auto layout, and type lookup.",
+    "tools": ["gn_find_node_by_type", "gn_remove_node", "gn_auto_layout_nodes", "gn_get_summary"],
+    "quality_hints": [
+      "删除节点前先查找类型与连接关系，避免误删主链节点。",
+      "复杂节点图每次大改后执行自动布局，提升可读性。"
+    ],
+    "verify_tools": ["gn_get_summary"]
+  },
+  {
+    "id": "animation.timeline_control",
+    "name": "Timeline control",
+    "domain": "scene",
+    "intents": ["animation", "modify"],
+    "tags": ["timeline", "frame range", "current frame", "fps"],
+    "description": "Set animation frame range and current frame for deterministic keyframe workflow.",
+    "tools": ["scene_set_frame_range", "scene_set_current_frame", "get_scene_info"],
+    "quality_hints": [
+      "先统一帧率和帧范围，再插关键帧，避免时间错位。",
+      "切换关键帧前设置 current frame，减少误操作。"
+    ],
+    "verify_tools": ["get_scene_info"]
+  },
+  {
+    "id": "modifier.apply_pipeline",
+    "name": "Modifier apply pipeline",
+    "domain": "scene",
+    "intents": ["modify", "create"],
+    "tags": ["modifier", "apply", "bevel", "subsurf"],
+    "description": "Add or tune modifiers and apply finalized modifier stack.",
+    "tools": ["scene_add_modifier", "scene_set_modifier_param", "scene_apply_modifier", "get_object_info"],
+    "quality_hints": [
+      "应用修改器前先检查参数和对象类型，避免不可逆错误。",
+      "建议先复制对象再 apply，保留回滚版本。"
+    ],
+    "verify_tools": ["get_object_info"]
+  },
+  {
+    "id": "file.save_and_export",
+    "name": "Save and export scene files",
+    "domain": "scene",
+    "intents": ["render", "modify", "create"],
+    "tags": ["save blend", "export fbx", "export gltf", "pipeline"],
+    "description": "Persist scene to .blend and export FBX/glTF deliverables.",
+    "tools": ["scene_save_blend", "scene_export_fbx", "scene_export_gltf", "file_list"],
+    "quality_hints": [
+      "导出前先保存 .blend，确保状态可追溯。",
+      "按目标引擎选择 GLB 或 GLTF_SEPARATE 并校验路径。"
+    ],
+    "verify_tools": ["file_list"]
   }
 ]

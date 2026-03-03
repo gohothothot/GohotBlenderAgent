@@ -42,11 +42,27 @@ TOOL_GROUPS = {
         "scene_add_light", "scene_modify_light",
         "scene_add_camera", "scene_set_active_camera",
         "scene_add_modifier", "scene_set_modifier_param", "scene_remove_modifier",
+        "scene_apply_modifier",
         "scene_manage_collection", "scene_set_world",
         "scene_duplicate_object", "scene_parent_object", "scene_set_visibility",
+        "scene_set_frame_range", "scene_set_current_frame",
         "scene_get_render_settings", "scene_set_render_settings",
+        "scene_save_blend", "scene_export_fbx", "scene_export_gltf",
         "scene_get_object_materials", "scene_get_world_info",
         "scene_list_all_materials",
+    ],
+    "controller": [
+        "controller_create_empty", "controller_add_copy_location",
+        "controller_add_copy_rotation", "controller_add_copy_scale",
+        "controller_add_track_to", "controller_add_custom_property",
+        "controller_add_child_of", "controller_set_constraint_influence",
+        "controller_remove_constraint",
+        "object_rename", "object_select_set_active", "object_duplicate_linked",
+    ],
+    "geometry_nodes": [
+        "gn_create_modifier", "gn_add_node", "gn_link_nodes",
+        "gn_set_input_default", "gn_expose_group_input", "gn_get_summary",
+        "gn_remove_node", "gn_auto_layout_nodes", "gn_find_node_by_type",
     ],
     "animation": [
         "anim_add_uv_scroll", "anim_add_uv_rotate", "anim_add_uv_scale",
@@ -85,21 +101,21 @@ TOOL_GROUPS = {
 
 # 意图 → 需要的工具组映射
 INTENT_TOOL_GROUPS = {
-    "create": ["basic", "material_basic", "scene", "shader_preset", "search"],
-    "modify": ["basic", "material_basic", "shader", "shader_preset", "scene", "search"],
+    "create": ["basic", "material_basic", "scene", "controller", "geometry_nodes", "shader_preset", "search"],
+    "modify": ["basic", "material_basic", "shader", "shader_preset", "scene", "controller", "geometry_nodes", "search"],
     "delete": ["basic", "scene"],
     "shader_complex": ["material_basic", "shader", "shader_preset", "search", "query"],
     "toon": ["material_basic", "toon", "shader", "shader_preset"],
-    "animation": ["animation", "shader", "basic"],
+    "animation": ["animation", "shader", "basic", "controller", "scene"],
     "render": ["render", "scene", "query"],
     "generate_3d": ["meshy", "basic", "material_basic"],
     "search": ["search", "query"],
-    "query": ["query", "basic", "meta"],
-    "plan": ["query", "search", "meta", "plan"],
+    "query": ["query", "basic", "meta", "geometry_nodes"],
+    "plan": ["query", "search", "meta", "plan", "scene", "controller", "geometry_nodes"],
     # general 意图给所有工具组，确保 LLM 能处理任何请求
     "general": [
         "basic", "material_basic", "shader", "shader_preset",
-        "toon", "scene", "animation", "render", "meshy",
+        "toon", "scene", "controller", "geometry_nodes", "animation", "render", "meshy",
         "search", "query", "meta", "file", "plan",
     ],
 }
