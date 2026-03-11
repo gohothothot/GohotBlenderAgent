@@ -9,6 +9,7 @@ import threading
 import traceback
 import time
 import json
+import re
 from typing import Callable, Optional
 
 from ..llm.base import LLMConfig
@@ -22,6 +23,7 @@ from .executor import ExecutorAgent
 from .validator import ValidatorAgent
 from ..core.runtime_core import RuntimeCoreMixin
 from ..core.skill_registry import build_skill_guidance
+from ..tools.registry import get_registry
 
 try:
     from ..backend.core.mini_rewrite import MiniRewriter
@@ -287,6 +289,23 @@ class AgentOrchestrator(RuntimeCoreMixin):
             self._process_simple(user_message, route, raw_user_message=raw_user_message)
             return
 
+        # 硬兜底：为缺失 tool 的步骤尝试自动补全。
+        plan = self._repair_plan_missing_tools(
+            plan=plan,
+            route=route,
+            raw_user_message=raw_user_message or user_message,
+            capability_tool_chain=capability_tool_chain or [],
+        )
+
+        # 若规划结果缺少可执行 tool（模型漂移/格式异常），自动降级到 simple 执行链，
+        # 避免 Plan 模式陷入连续 [NO_TOOLCALL]。
+        actionable_steps = [s for s in (plan.steps or []) if str(getattr(s, "tool", "") or "").strip()]
+        if not actionable_steps:
+            _log("Plan has no actionable tools, fallback to simple execution")
+            self._emit_message("assistant", "规划结果未提供可执行工具，自动切换直接执行链路。")
+            self._process_simple(user_message, route, raw_user_message=raw_user_message)
+            return
+
         if self.on_plan:
             steps_preview = "\n".join(
                 f"  {s.step}. {s.description or s.tool}" for s in plan.steps
@@ -301,7 +320,7 @@ class AgentOrchestrator(RuntimeCoreMixin):
 
             _log(f"Step {next_step.step}: tool={next_step.tool}, params_keys={list(next_step.params.keys()) if next_step.params else []}")
 
-            if self.on_tool_call:
+            if self.on_tool_call and str(next_step.tool or "").strip():
                 self._fire_callback(self.on_tool_call, next_step.tool, next_step.params)
 
             result = self._execute_plan_step_with_policy(
@@ -413,6 +432,101 @@ class AgentOrchestrator(RuntimeCoreMixin):
         if safe_steps:
             plan.steps = safe_steps
         return plan
+
+    def _repair_plan_missing_tools(self, plan, route, raw_user_message: str, capability_tool_chain: list[str]):
+        """
+        为缺失 tool 的计划步骤做自动补全：
+        - 优先命中 capability grounding 链路
+        - 其次在 intent 工具子集中做关键词匹配
+        """
+        try:
+            steps = list(getattr(plan, "steps", []) or [])
+            if not steps:
+                return plan
+
+            registry = get_registry()
+            intent_tools = registry.get_for_intent(getattr(route, "intent", "general") or "general")
+            intent_tool_names = [t.name for t in (intent_tools or []) if getattr(t, "name", "")]
+            allow_set = set(intent_tool_names) if intent_tool_names else set()
+            if capability_tool_chain:
+                allow_set.update([str(x).strip() for x in capability_tool_chain if str(x).strip()])
+
+            def _tokens(text: str) -> list[str]:
+                return [x for x in re.findall(r"[a-zA-Z_][a-zA-Z0-9_.]*|[\u4e00-\u9fff]{2,}", text or "") if x]
+
+            # 语义别名（最小可维护映射）
+            alias_map = [
+                (("复制位置", "copy location", "跟随位置", "copy_location"), "controller_add_copy_location"),
+                (("朝向", "看向", "track to", "track_to"), "controller_add_track_to"),
+                (("child of", "子父约束", "层级约束", "child_of"), "controller_add_child_of"),
+                (("影响值", "influence"), "controller_set_constraint_influence"),
+                (("移除约束", "remove constraint"), "controller_remove_constraint"),
+                (("创建控制器", "empty", "控制器"), "controller_create_empty"),
+                (("重命名", "rename"), "object_rename"),
+                (("设为活动", "active", "选中"), "object_select_set_active"),
+                (("关联复制", "linked duplicate", "实例"), "object_duplicate_linked"),
+                (("添加修改器", "modifier", "bevel", "subdivision"), "scene_add_modifier"),
+                (("应用修改器", "apply modifier"), "scene_apply_modifier"),
+                (("时间轴", "帧范围", "frame range", "fps"), "scene_set_frame_range"),
+                (("当前帧", "current frame"), "scene_set_current_frame"),
+                (("保存blend", "save blend", ".blend"), "scene_save_blend"),
+                (("导出fbx", "export fbx", "fbx"), "scene_export_fbx"),
+                (("导出gltf", "导出glb", "export gltf", "glb"), "scene_export_gltf"),
+                (("几何节点摘要", "gn summary", "get summary"), "gn_get_summary"),
+                (("删除节点", "remove node"), "gn_remove_node"),
+                (("自动排布", "layout nodes"), "gn_auto_layout_nodes"),
+                (("查找节点", "find node"), "gn_find_node_by_type"),
+            ]
+
+            repaired = 0
+            for s in steps:
+                current_tool = str(getattr(s, "tool", "") or "").strip()
+                if current_tool:
+                    continue
+                desc = str(getattr(s, "description", "") or "")
+                search_text = f"{raw_user_message}\n{desc}".lower()
+                tk = set(_tokens(search_text))
+
+                # 1) grounding 链路优先：描述中命中链路工具名碎片
+                picked = ""
+                for gn in (capability_tool_chain or []):
+                    g = str(gn).strip()
+                    if not g:
+                        continue
+                    parts = set(_tokens(g.lower()))
+                    if parts and (parts & tk):
+                        picked = g
+                        break
+
+                # 2) alias 匹配
+                if not picked:
+                    for keys, target in alias_map:
+                        if any(k in search_text for k in keys):
+                            picked = target
+                            break
+
+                # 3) 回退：描述词和可用工具名做最大交集
+                if not picked and allow_set:
+                    best_score = 0
+                    for cand in allow_set:
+                        parts = set(_tokens(str(cand).lower()))
+                        score = len(parts & tk)
+                        if score > best_score:
+                            best_score = score
+                            picked = cand
+
+                if picked and ((not allow_set) or (picked in allow_set)):
+                    s.tool = picked
+                    if not isinstance(getattr(s, "params", None), dict):
+                        s.params = {}
+                    repaired += 1
+
+            if repaired and self.on_plan:
+                self._fire_callback(self.on_plan, f"🛠 已自动补全 {repaired} 个缺失工具步骤。")
+            return plan
+        except Exception as e:
+            _log(f"repair missing plan tools failed: {e}")
+            return plan
 
     def _execute_plan_step_with_policy(self, step, route, prev_summary: str, user_message: str) -> dict:
         on_fail = step.on_fail or {}

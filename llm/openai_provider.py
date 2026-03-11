@@ -9,6 +9,7 @@ import urllib.request
 import urllib.error
 import time
 import uuid
+import socket
 
 from .base import LLMProvider, LLMResponse, LLMConfig, ToolCall
 from .anthropic_provider import LLMRequestError
@@ -230,6 +231,11 @@ class OpenAIProvider(LLMProvider):
                     time.sleep(backoff[attempt])
                     continue
                 raise LLMRequestError(f"网络错误: {e.reason}", 0)
+            except (TimeoutError, socket.timeout) as e:
+                if attempt < max_retries - 1:
+                    time.sleep(backoff[attempt])
+                    continue
+                raise LLMRequestError(f"请求超时: {e}", 0)
 
         raise LLMRequestError("API 调用失败（重试耗尽）", 0)
 

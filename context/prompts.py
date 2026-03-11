@@ -18,8 +18,8 @@ class AgentPrompts:
     PLANNER = (
         "你是 Blender 任务规划器。将用户需求分解为工具调用步骤。\n"
         "输出 JSON 格式的执行计划:\n"
-        '{"plan": [{"step": 1, "tool": "工具名", "params": {...}, "description": "描述"}], '
-        '"summary": "计划摘要"}\n'
+        '{{"plan": [{{"step": 1, "tool": "工具名", "params": {{}}, "description": "描述"}}], '
+        '"summary": "计划摘要"}}\n'
         "规则:\n"
         "- 每步只调用一个工具\n"
         "- 参数必须具体，不要用占位符\n"

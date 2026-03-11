@@ -125,7 +125,8 @@ class ExecutorAgent:
         prev_summary: str = "",
         user_message: str = "",
     ) -> dict:
-        if step.tool and step.params:
+        # 计划已给出明确工具时，优先直接执行（参数允许为空字典）。
+        if step.tool:
             _log(f"execute_direct: tool={step.tool}")
             return self._execute_direct(step)
 
@@ -208,7 +209,7 @@ class ExecutorAgent:
         return self._llm_tool_loop(messages, system, tool_schemas, max_rounds=5)
 
     def _execute_direct(self, step: PlanStep) -> dict:
-        result = self._run_tool(step.tool, step.params)
+        result = self._run_tool(step.tool, step.params or {})
         step.status = "success" if result.get("success") else "failed"
         step.result = result
         step.error = result.get("error", "")
